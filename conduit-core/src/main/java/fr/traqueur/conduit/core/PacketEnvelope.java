@@ -1,0 +1,249 @@
+package fr.traqueur.conduit.core;
+
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * Binary protocol envelope for packet transmission.
+ * 
+ * <p>Format:</p>
+ * <pre>
+ * [1 byte: flags] [4 bytes: packetType length] [N bytes: packetType]
+ * [4 bytes: ackId length] [N bytes: ackId]
+ * [4 bytes: ackResponse length] [N bytes: ackResponse JSON]
+ * [4 bytes: payload length] [N bytes: payload]
+ * </pre>
+ * 
+ * Flags (8 bits):
+ * - Bit 0: requiresAck
+ * - Bit 1: isAckResponse
+ * - Bits 2-7: reserved
+ *
+ * @author Traqueur
+ */
+public class PacketEnvelope {
+    
+    private final String packetType;
+    private final byte[] payload;
+    private final boolean requiresAck;
+    private final boolean isAckResponse;
+    private final String ackId;
+    private final AckResponse ackResponse;
+    private final Map<String, String> metadata;
+
+    public PacketEnvelope(String packetType, byte[] payload, boolean requiresAck, 
+                          boolean isAckResponse, String ackId, AckResponse ackResponse,  Map<String, String> metadata) {
+        this.packetType = packetType;
+        this.payload = payload;
+        this.requiresAck = requiresAck;
+        this.isAckResponse = isAckResponse;
+        this.ackId = ackId;
+        this.ackResponse = ackResponse;
+        this.metadata = metadata;
+    }
+    
+    public String packetType() {
+        return packetType;
+    }
+    
+    public byte[] payload() {
+        return payload;
+    }
+    
+    public boolean requiresAck() {
+        return requiresAck;
+    }
+    
+    public boolean isAckResponse() {
+        return isAckResponse;
+    }
+    
+    public String ackId() {
+        return ackId;
+    }
+    
+    public AckResponse ackResponse() {
+        return ackResponse;
+    }
+
+    public Map<String, String> metadata() { return metadata; }
+    /**
+     * Serializes this envelope to bytes.
+     */
+    public byte[] toBytes() throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(baos);
+
+        // Write flags
+        byte flags = 0;
+        if (requiresAck) flags |= 0x01;
+        if (isAckResponse) flags |= 0x02;
+        dos.writeByte(flags);
+
+        // Write packetType
+        writeString(dos, packetType);
+
+        // Write ackId
+        writeString(dos, ackId);
+
+        // Write ackResponse (as JSON)
+        if (ackResponse != null) {
+            String ackJson = serializeAckResponse(ackResponse);
+            writeString(dos, ackJson);
+        } else {
+            dos.writeInt(0);
+        }
+
+        // Write metadata
+        dos.writeInt(metadata.size());
+        for (Map.Entry<String, String> entry : metadata.entrySet()) {
+            writeString(dos, entry.getKey());
+            writeString(dos, entry.getValue());
+        }
+
+        // Write payload
+        if (payload != null) {
+            dos.writeInt(payload.length);
+            dos.write(payload);
+        } else {
+            dos.writeInt(0);
+        }
+
+        dos.flush();
+        return baos.toByteArray();
+    }
+
+    public static PacketEnvelope fromBytes(byte[] data) throws IOException {
+        ByteArrayInputStream bais = new ByteArrayInputStream(data);
+        DataInputStream dis = new DataInputStream(bais);
+
+        // Read flags
+        byte flags = dis.readByte();
+        boolean requiresAck = (flags & 0x01) != 0;
+        boolean isAckResponse = (flags & 0x02) != 0;
+
+        // Read packetType
+        String packetType = readString(dis);
+
+        // Read ackId
+        String ackId = readString(dis);
+
+        // Read ackResponse
+        String ackJson = readString(dis);
+        AckResponse ackResponse = null;
+        if (ackJson != null && !ackJson.isEmpty()) {
+            ackResponse = deserializeAckResponse(ackJson);
+        }
+
+        // Read metadata
+        int metadataSize = dis.readInt();
+        Map<String, String> metadata = new HashMap<>();
+        for (int i = 0; i < metadataSize; i++) {
+            String key = readString(dis);
+            String value = readString(dis);
+            if (key != null && value != null) {
+                metadata.put(key, value);
+            }
+        }
+
+        // Read payload
+        int payloadLength = dis.readInt();
+        byte[] payload = null;
+        if (payloadLength > 0) {
+            payload = new byte[payloadLength];
+            dis.readFully(payload);
+        }
+
+        return new PacketEnvelope(packetType, payload, requiresAck, isAckResponse, ackId, ackResponse, metadata);
+    }
+    
+    private static void writeString(DataOutputStream dos, String str) throws IOException {
+        if (str == null || str.isEmpty()) {
+            dos.writeInt(0);
+        } else {
+            byte[] bytes = str.getBytes(StandardCharsets.UTF_8);
+            dos.writeInt(bytes.length);
+            dos.write(bytes);
+        }
+    }
+    
+    private static String readString(DataInputStream dis) throws IOException {
+        int length = dis.readInt();
+        if (length == 0) {
+            return null;
+        }
+        byte[] bytes = new byte[length];
+        dis.readFully(bytes);
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+    
+    private static String serializeAckResponse(AckResponse ackResponse) {
+        // Simple JSON serialization
+        return String.format(
+            "{\"packetId\":\"%s\",\"success\":%b,\"message\":\"%s\",\"timestamp\":\"%s\"}",
+            escape(ackResponse.packetId()),
+            ackResponse.success(),
+            escape(ackResponse.message()),
+            ackResponse.timestamp().toString()
+        );
+    }
+    
+    private static AckResponse deserializeAckResponse(String json) {
+        // Simple JSON deserialization (you could use Gson here if needed)
+        try {
+            // Extract values using simple parsing
+            String packetId = extractJsonValue(json, "packetId");
+            boolean success = Boolean.parseBoolean(extractJsonValue(json, "success"));
+            String message = extractJsonValue(json, "message");
+            String timestamp = extractJsonValue(json, "timestamp");
+            
+            return new AckResponse(
+                packetId,
+                success,
+                message,
+                Instant.parse(timestamp)
+            );
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to deserialize AckResponse", e);
+        }
+    }
+    
+    private static String extractJsonValue(String json, String key) {
+        String pattern = "\"" + key + "\":";
+        int start = json.indexOf(pattern);
+        if (start == -1) return null;
+        
+        start += pattern.length();
+        
+        // Skip whitespace
+        while (start < json.length() && Character.isWhitespace(json.charAt(start))) {
+            start++;
+        }
+        
+        if (json.charAt(start) == '"') {
+            // String value
+            start++;
+            int end = json.indexOf('"', start);
+            return json.substring(start, end);
+        } else {
+            // Boolean/number value
+            int end = start;
+            while (end < json.length() && json.charAt(end) != ',' && json.charAt(end) != '}') {
+                end++;
+            }
+            return json.substring(start, end).trim();
+        }
+    }
+    
+    private static String escape(String str) {
+        if (str == null) return "";
+        return str.replace("\\", "\\\\")
+                  .replace("\"", "\\\"")
+                  .replace("\n", "\\n")
+                  .replace("\r", "\\r")
+                  .replace("\t", "\\t");
+    }
+}
