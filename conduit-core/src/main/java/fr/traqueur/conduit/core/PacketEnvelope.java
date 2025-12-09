@@ -34,7 +34,18 @@ public class PacketEnvelope {
     private final AckResponse ackResponse;
     private final Map<String, String> metadata;
 
-    public PacketEnvelope(String packetType, byte[] payload, boolean requiresAck, 
+    /**
+     * Creates a new packet envelope.
+     *
+     * @param packetType the packet type identifier
+     * @param payload the serialized and compressed packet data
+     * @param requiresAck whether this packet requires acknowledgment
+     * @param isAckResponse whether this envelope contains an ACK response
+     * @param ackId the acknowledgment ID (for ACK tracking)
+     * @param ackResponse the ACK response (if this is an ACK response envelope)
+     * @param metadata transport-specific routing metadata
+     */
+    public PacketEnvelope(String packetType, byte[] payload, boolean requiresAck,
                           boolean isAckResponse, String ackId, AckResponse ackResponse,  Map<String, String> metadata) {
         this.packetType = packetType;
         this.payload = payload;
@@ -44,34 +55,73 @@ public class PacketEnvelope {
         this.ackResponse = ackResponse;
         this.metadata = metadata;
     }
-    
+
+    /**
+     * Gets the packet type identifier.
+     *
+     * @return the packet type
+     */
     public String packetType() {
         return packetType;
     }
-    
+
+    /**
+     * Gets the serialized and compressed packet payload.
+     *
+     * @return the payload bytes
+     */
     public byte[] payload() {
         return payload;
     }
-    
+
+    /**
+     * Checks if this packet requires acknowledgment.
+     *
+     * @return true if ACK is required
+     */
     public boolean requiresAck() {
         return requiresAck;
     }
-    
+
+    /**
+     * Checks if this envelope contains an ACK response.
+     *
+     * @return true if this is an ACK response
+     */
     public boolean isAckResponse() {
         return isAckResponse;
     }
-    
+
+    /**
+     * Gets the acknowledgment ID for ACK tracking.
+     *
+     * @return the ACK ID, or null if not applicable
+     */
     public String ackId() {
         return ackId;
     }
-    
+
+    /**
+     * Gets the ACK response if this envelope contains one.
+     *
+     * @return the ACK response, or null if not applicable
+     */
     public AckResponse ackResponse() {
         return ackResponse;
     }
 
-    public Map<String, String> metadata() { return metadata; }
     /**
-     * Serializes this envelope to bytes.
+     * Gets the metadata map for transport-specific routing information.
+     *
+     * @return the metadata map
+     */
+    public Map<String, String> metadata() { return metadata; }
+
+    /**
+     * Serializes this envelope to bytes using the binary protocol format.
+     *
+     * @return the serialized envelope
+     * @throws IOException if serialization fails
      */
     public byte[] toBytes() throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -116,6 +166,13 @@ public class PacketEnvelope {
         return baos.toByteArray();
     }
 
+    /**
+     * Deserializes an envelope from bytes.
+     *
+     * @param data the serialized envelope data
+     * @return the deserialized PacketEnvelope
+     * @throws IOException if deserialization fails
+     */
     public static PacketEnvelope fromBytes(byte[] data) throws IOException {
         ByteArrayInputStream bais = new ByteArrayInputStream(data);
         DataInputStream dis = new DataInputStream(bais);

@@ -12,9 +12,15 @@ import java.util.concurrent.ConcurrentHashMap;
  * @author Traqueur
  */
 public class PacketRegistry {
-    
+
     private final Map<String, Class<? extends Packet>> packetTypes = new ConcurrentHashMap<>();
     private final Map<Class<? extends Packet>, String> reverseMapping = new ConcurrentHashMap<>();
+
+    /**
+     * Creates a new packet registry.
+     */
+    public PacketRegistry() {
+    }
     
     /**
      * Registers a packet type with its simple class name as identifier.

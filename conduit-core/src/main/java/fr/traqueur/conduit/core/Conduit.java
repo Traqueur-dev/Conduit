@@ -113,6 +113,12 @@ public class Conduit {
     }
     // ===== Send Methods (called by Packet interfaces) =====
 
+    /**
+     * Sends a packet via broadcast to all listening instances.
+     * Internal method called by {@link Packet#send()}.
+     *
+     * @param packet the packet to send
+     */
     public void send(Packet packet) {
         String channel = getChannelForPacket(packet);
 
@@ -131,6 +137,13 @@ public class Conduit {
         }
     }
 
+    /**
+     * Sends a packet to a specific target instance (unicast).
+     * Internal method called by {@link fr.traqueur.conduit.packet.TargetablePacket#sendTo(String)}.
+     *
+     * @param packet the packet to send
+     * @param targetId the unique identifier of the target instance
+     */
     public void sendTo(Packet packet, String targetId) {
         String channel = getChannelForPacket(packet);
 
@@ -151,6 +164,14 @@ public class Conduit {
         }
     }
 
+    /**
+     * Sends a packet via broadcast and waits for an acknowledgment response.
+     * Internal method called by {@link fr.traqueur.conduit.packet.AcknowledgeablePacket#sendWithAck(long)}.
+     *
+     * @param packet the packet to send
+     * @param timeoutMs timeout in milliseconds
+     * @return a CompletableFuture containing the acknowledgment response
+     */
     public CompletableFuture<AckResponse> sendWithAck(Packet packet, long timeoutMs) {
         String channel = getChannelForPacket(packet);
 
@@ -176,6 +197,15 @@ public class Conduit {
         }
     }
 
+    /**
+     * Sends a packet to a specific target and waits for an acknowledgment response.
+     * Internal method called by {@link fr.traqueur.conduit.packet.TargetableAcknowledgeablePacket#sendWithAck(String, long)}.
+     *
+     * @param packet the packet to send
+     * @param targetId the unique identifier of the target instance
+     * @param timeoutMs timeout in milliseconds
+     * @return a CompletableFuture containing the acknowledgment response
+     */
     public CompletableFuture<AckResponse> sendWithAck(Packet packet, String targetId, long timeoutMs) {
         String channel = getChannelForPacket(packet);
 
@@ -208,10 +238,8 @@ public class Conduit {
     /**
      * Initializes the transport and subscribes to channels.
      * Should be called after registering all packets and handlers.
-     */
-    /**
-     * Initializes the transport and subscribes to channels.
-     * Should be called after registering all packets and handlers.
+     *
+     * @throws Exception if transport connection or channel subscription fails
      */
     public void start() throws Exception {
         transport.connect();

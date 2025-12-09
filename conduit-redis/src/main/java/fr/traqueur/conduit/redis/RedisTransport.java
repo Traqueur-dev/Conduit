@@ -44,6 +44,11 @@ public class RedisTransport implements Transport {
     // Pour gérer les ACK avec Redis (on utilise des channels temporaires)
     private final Map<String, CompletableFuture<AckResponse>> pendingAcks = new ConcurrentHashMap<>();
 
+    /**
+     * Creates a new Redis transport with the specified configuration.
+     *
+     * @param config the Redis configuration
+     */
     public RedisTransport(RedisConfig config) {
         this.config = config;
     }

@@ -17,6 +17,13 @@ import fr.traqueur.conduit.core.Conduit;
  */
 public interface TargetablePacket extends Packet {
 
+    /**
+     * Regular send is not supported for targetable packets.
+     * Use {@link #sendTo(String)} instead.
+     *
+     * @throws UnsupportedOperationException always thrown
+     */
+    @Override
     default void send() {
         throw new UnsupportedOperationException(
                 "Use sendTo(String targetId) for targetable packets. Regular send() is not supported."
@@ -25,7 +32,7 @@ public interface TargetablePacket extends Packet {
 
     /**
      * Sends this packet to a specific target instance (unicast).
-     * 
+     *
      * @param targetId the unique identifier of the target instance
      */
     default void sendTo(String targetId) {

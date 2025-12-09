@@ -38,6 +38,11 @@ public class RabbitMQTransport implements Transport {
     // Pour gérer les ACK
     private final Map<String, CompletableFuture<AckResponse>> pendingAcks = new ConcurrentHashMap<>();
 
+    /**
+     * Creates a new RabbitMQ transport with the specified configuration.
+     *
+     * @param config the RabbitMQ configuration
+     */
     public RabbitMQTransport(RabbitMQConfig config) {
         this.config = config;
     }
@@ -301,20 +306,33 @@ public class RabbitMQTransport implements Transport {
 
     /**
      * Consumer for regular messages.
-     */
-    /**
-     * Consumer for regular messages.
+     * Handles both broadcast and unicast packet deliveries,
+     * extracting RabbitMQ-specific metadata and passing it to the handler.
      */
     private class MessageConsumer implements DeliverCallback {
 
         private final String channelName;
         private final BiConsumer<String, byte[]> handler;
 
+        /**
+         * Creates a new message consumer.
+         *
+         * @param channelName the channel name
+         * @param handler the callback to invoke with received messages
+         */
         public MessageConsumer(String channelName, BiConsumer<String, byte[]> handler) {
             this.channelName = channelName;
             this.handler = handler;
         }
 
+        /**
+         * Handles message delivery from RabbitMQ.
+         * Extracts replyTo and correlationId properties and injects them
+         * into the packet envelope metadata for ACK routing.
+         *
+         * @param consumerTag the consumer tag
+         * @param delivery the message delivery
+         */
         @Override
         public void handle(String consumerTag, Delivery delivery) {
             try {
@@ -347,15 +365,29 @@ public class RabbitMQTransport implements Transport {
 
     /**
      * Consumer for ACK responses.
+     * Listens on temporary reply queues for acknowledgment responses
+     * and completes the corresponding future when a matching correlationId is received.
      */
     private class AckConsumer implements DeliverCallback {
 
         private final String correlationId;
 
+        /**
+         * Creates a new ACK consumer.
+         *
+         * @param correlationId the correlation ID to match
+         */
         public AckConsumer(String correlationId) {
             this.correlationId = correlationId;
         }
 
+        /**
+         * Handles ACK response delivery from RabbitMQ.
+         * Matches the correlationId and completes the pending future with the ACK response.
+         *
+         * @param consumerTag the consumer tag
+         * @param delivery the ACK response delivery
+         */
         @Override
         public void handle(String consumerTag, Delivery delivery) {
             String receivedCorrelationId = delivery.getProperties().getCorrelationId();

@@ -19,27 +19,41 @@ public record RedisConfig(
     
     /**
      * Creates a default local Redis config (localhost:6379, no password, db 0).
+     *
+     * @return a default local Redis configuration
      */
     public static RedisConfig localhost() {
         return new RedisConfig("localhost", 6379, null, 0);
     }
-    
+
     /**
      * Creates a Redis config with custom host and port.
+     *
+     * @param host the Redis server host
+     * @param port the Redis server port
+     * @return a Redis configuration
      */
     public static RedisConfig of(String host, int port) {
         return new RedisConfig(host, port, null, 0);
     }
-    
+
     /**
      * Creates a Redis config with authentication.
+     *
+     * @param host the Redis server host
+     * @param port the Redis server port
+     * @param password the Redis password
+     * @return a Redis configuration with authentication
      */
     public static RedisConfig of(String host, int port, String password) {
         return new RedisConfig(host, port, password, 0);
     }
-    
+
     /**
      * Gets the Redis URI for Lettuce connection.
+     * Format: redis://[:password@]host:port/database
+     *
+     * @return the Redis URI string
      */
     public String toUri() {
         StringBuilder uri = new StringBuilder("redis://");

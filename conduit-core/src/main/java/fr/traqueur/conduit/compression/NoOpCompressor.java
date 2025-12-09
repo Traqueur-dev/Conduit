@@ -7,6 +7,12 @@ package fr.traqueur.conduit.compression;
  * @author Traqueur
  */
 public class NoOpCompressor implements Compressor {
+
+    /**
+     * Creates a new no-op compressor.
+     */
+    public NoOpCompressor() {
+    }
     
     @Override
     public byte[] compress(byte[] data) {

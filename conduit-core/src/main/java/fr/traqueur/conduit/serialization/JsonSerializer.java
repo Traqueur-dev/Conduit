@@ -17,7 +17,10 @@ public class JsonSerializer implements Serializer {
     
     private final GsonBuilder builder;
     private volatile Gson gson;
-    
+
+    /**
+     * Creates a new JSON serializer with default configuration.
+     */
     public JsonSerializer() {
         this.builder = new GsonBuilder()
                 .disableHtmlEscaping();

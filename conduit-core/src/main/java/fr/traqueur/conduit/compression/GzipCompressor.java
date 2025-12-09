@@ -12,6 +12,12 @@ import java.util.zip.GZIPOutputStream;
  * @author Traqueur
  */
 public class GzipCompressor implements Compressor {
+
+    /**
+     * Creates a new Gzip compressor.
+     */
+    public GzipCompressor() {
+    }
     
     @Override
     public byte[] compress(byte[] data) throws Exception {

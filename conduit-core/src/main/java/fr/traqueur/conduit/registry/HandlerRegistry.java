@@ -20,6 +20,12 @@ public class HandlerRegistry {
     private final Map<Class<? extends Packet>, HandlerWrapper<?>> handlers = new ConcurrentHashMap<>();
 
     /**
+     * Creates a new handler registry.
+     */
+    public HandlerRegistry() {
+    }
+
+    /**
      * Registers a handler for a specific packet type.
      *
      * @param <T> the packet type
