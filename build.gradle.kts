@@ -7,6 +7,13 @@ allprojects {
     group = "fr.traqueur.conduit"
     version = "1.0.0"
 
+    extra.set("classifier", System.getProperty("archive.classifier"))
+    extra.set("sha", System.getProperty("github.sha"))
+
+    rootProject.extra.properties["sha"]?.let { sha ->
+        version = sha
+    }
+
     repositories {
         mavenCentral()
     }
