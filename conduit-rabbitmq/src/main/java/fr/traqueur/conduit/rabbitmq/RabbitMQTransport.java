@@ -8,19 +8,20 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.function.BiConsumer;
 
 /**
  * RabbitMQ transport implementation.
  *
- * <p>Uses fanout exchanges for broadcast and direct exchanges for unicast.</p>
+ * <p>Uses fanout exchanges for broadcast and direct exchanges for unicast.
+ * Maintains separate channels for publishing and consuming to ensure thread-safety,
+ * with a lock protecting all publish operations.</p>
  *
  * @author Traqueur
  */
@@ -30,7 +31,12 @@ public class RabbitMQTransport implements Transport {
 
     private final RabbitMQConfig config;
     private Connection connection;
-    private Channel channel;
+    private Channel consumeChannel;
+    private Channel publishChannel;
+    private final Object publishLock = new Object();
+
+    // Cache of declared exchanges to avoid redundant round-trips
+    private final Set<String> declaredExchanges = ConcurrentHashMap.newKeySet();
 
     // Queues for receiving messages
     private final Map<String, String> queueNames = new ConcurrentHashMap<>();
@@ -61,21 +67,21 @@ public class RabbitMQTransport implements Transport {
         factory.setNetworkRecoveryInterval(5000);
 
         connection = factory.newConnection();
-        channel = connection.createChannel();
+        consumeChannel = connection.createChannel();
+        publishChannel = connection.createChannel();
 
         LOGGER.info("Connected to RabbitMQ at {}:{}", config.host(), config.port());
     }
 
     @Override
     public void broadcast(String channelName, byte[] data) {
+        String exchangeName = "conduit.broadcast." + channelName;
         try {
-            // Use fanout exchange for broadcast
-            String exchangeName = "conduit.broadcast." + channelName;
-            channel.exchangeDeclare(exchangeName, BuiltinExchangeType.FANOUT, true);
-            channel.basicPublish(exchangeName, "", null, data);
-
+            synchronized (publishLock) {
+                ensureExchange(exchangeName, BuiltinExchangeType.FANOUT);
+                publishChannel.basicPublish(exchangeName, "", null, data);
+            }
             LOGGER.debug("Published to broadcast exchange: {}", exchangeName);
-
         } catch (IOException e) {
             LOGGER.error("Failed to broadcast message", e);
         }
@@ -83,14 +89,13 @@ public class RabbitMQTransport implements Transport {
 
     @Override
     public void sendTo(String channelName, String targetId, byte[] data) {
+        String exchangeName = "conduit.direct." + channelName;
         try {
-            // Use direct exchange for unicast
-            String exchangeName = "conduit.direct." + channelName;
-            channel.exchangeDeclare(exchangeName, BuiltinExchangeType.DIRECT, true);
-            channel.basicPublish(exchangeName, targetId, null, data);
-
+            synchronized (publishLock) {
+                ensureExchange(exchangeName, BuiltinExchangeType.DIRECT);
+                publishChannel.basicPublish(exchangeName, targetId, null, data);
+            }
             LOGGER.debug("Published to direct exchange: {} with routing key: {}", exchangeName, targetId);
-
         } catch (IOException e) {
             LOGGER.error("Failed to send unicast message", e);
         }
@@ -103,39 +108,38 @@ public class RabbitMQTransport implements Transport {
         pendingAcks.put(correlationId, future);
 
         try {
-            // Create temporary reply queue
-            String replyQueue = this.channel.queueDeclare().getQueue();
-
-            // Setup consumer for reply
-            this.channel.basicConsume(replyQueue, true,
+            // Create temporary reply queue and consumer on consumeChannel
+            String replyQueue = consumeChannel.queueDeclare().getQueue();
+            consumeChannel.basicConsume(replyQueue, true,
                     new AckConsumer(correlationId),
                     consumerTag -> LOGGER.debug("ACK consumer cancelled: {}", consumerTag));
 
-            // Send message with reply-to
+            // Send message with reply-to on publishChannel
             String exchangeName = "conduit.broadcast." + channel;
-            this.channel.exchangeDeclare(exchangeName, BuiltinExchangeType.FANOUT, true);
-
             AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
                     .correlationId(correlationId)
                     .replyTo(replyQueue)
                     .build();
 
-            this.channel.basicPublish(exchangeName, "", props, data);
+            synchronized (publishLock) {
+                ensureExchange(exchangeName, BuiltinExchangeType.FANOUT);
+                publishChannel.basicPublish(exchangeName, "", props, data);
+            }
 
             LOGGER.debug("Published with ACK to exchange: {} (correlationId: {})", exchangeName, correlationId);
 
-            // Timeout handling
-            future.orTimeout(timeoutMs, TimeUnit.MILLISECONDS)
-                    .whenComplete((result, error) -> {
-                        pendingAcks.remove(correlationId);
-                        try {
-                            if (this.channel != null && this.channel.isOpen()) {
-                                this.channel.queueDelete(replyQueue);
-                            }
-                        } catch (IOException e) {
-                            LOGGER.warn("Failed to delete reply queue: {}", replyQueue, e);
-                        }
-                    });
+            // Timeout handling — attach cleanup to original future, not the orTimeout derivative
+            future.orTimeout(timeoutMs, TimeUnit.MILLISECONDS);
+            future.whenComplete((result, error) -> {
+                pendingAcks.remove(correlationId);
+                try {
+                    if (consumeChannel != null && consumeChannel.isOpen()) {
+                        consumeChannel.queueDelete(replyQueue);
+                    }
+                } catch (IOException e) {
+                    LOGGER.warn("Failed to delete reply queue: {}", replyQueue, e);
+                }
+            });
 
         } catch (IOException e) {
             future.completeExceptionally(e);
@@ -158,7 +162,9 @@ public class RabbitMQTransport implements Transport {
                         .correlationId(correlationId)
                         .build();
 
-                this.channel.basicPublish("", replyTo, props, data);
+                synchronized (publishLock) {
+                    publishChannel.basicPublish("", replyTo, props, data);
+                }
 
                 LOGGER.debug("Sent ACK to replyTo queue: {} with correlationId: {}", replyTo, correlationId);
 
@@ -178,40 +184,39 @@ public class RabbitMQTransport implements Transport {
         pendingAcks.put(correlationId, future);
 
         try {
-            // Create temporary reply queue
-            String replyQueue = this.channel.queueDeclare().getQueue();
-
-            // Setup consumer for reply
-            this.channel.basicConsume(replyQueue, true,
+            // Create temporary reply queue and consumer on consumeChannel
+            String replyQueue = consumeChannel.queueDeclare().getQueue();
+            consumeChannel.basicConsume(replyQueue, true,
                     new AckConsumer(correlationId),
                     consumerTag -> LOGGER.debug("ACK consumer cancelled: {}", consumerTag));
 
-            // Send message with reply-to
+            // Send message with reply-to on publishChannel
             String exchangeName = "conduit.direct." + channel;
-            this.channel.exchangeDeclare(exchangeName, BuiltinExchangeType.DIRECT, true);
-
             AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
                     .correlationId(correlationId)
                     .replyTo(replyQueue)
                     .build();
 
-            this.channel.basicPublish(exchangeName, targetId, props, data);
+            synchronized (publishLock) {
+                ensureExchange(exchangeName, BuiltinExchangeType.DIRECT);
+                publishChannel.basicPublish(exchangeName, targetId, props, data);
+            }
 
             LOGGER.debug("Published with ACK to exchange: {} routing key: {} (correlationId: {})",
                     exchangeName, targetId, correlationId);
 
-            // Timeout handling
-            future.orTimeout(timeoutMs, TimeUnit.MILLISECONDS)
-                    .whenComplete((result, error) -> {
-                        pendingAcks.remove(correlationId);
-                        try {
-                            if (this.channel != null && this.channel.isOpen()) {
-                                this.channel.queueDelete(replyQueue);
-                            }
-                        } catch (IOException e) {
-                            LOGGER.warn("Failed to delete reply queue: {}", replyQueue, e);
-                        }
-                    });
+            // Timeout handling — attach cleanup to original future, not the orTimeout derivative
+            future.orTimeout(timeoutMs, TimeUnit.MILLISECONDS);
+            future.whenComplete((result, error) -> {
+                pendingAcks.remove(correlationId);
+                try {
+                    if (consumeChannel != null && consumeChannel.isOpen()) {
+                        consumeChannel.queueDelete(replyQueue);
+                    }
+                } catch (IOException e) {
+                    LOGGER.warn("Failed to delete reply queue: {}", replyQueue, e);
+                }
+            });
 
         } catch (IOException e) {
             future.completeExceptionally(e);
@@ -225,14 +230,17 @@ public class RabbitMQTransport implements Transport {
     public void subscribe(String channel, BiConsumer<String, byte[]> handler) {
         try {
             String exchangeName = "conduit.broadcast." + channel;
-            this.channel.exchangeDeclare(exchangeName, BuiltinExchangeType.FANOUT, true);
+
+            synchronized (publishLock) {
+                ensureExchange(exchangeName, BuiltinExchangeType.FANOUT);
+            }
 
             // Create exclusive queue for this instance (auto-delete when connection closes)
-            String queueName = this.channel.queueDeclare().getQueue();
-            this.channel.queueBind(queueName, exchangeName, "");
+            String queueName = consumeChannel.queueDeclare().getQueue();
+            consumeChannel.queueBind(queueName, exchangeName, "");
 
             // Start consuming
-            this.channel.basicConsume(queueName, true,
+            consumeChannel.basicConsume(queueName, true,
                     new MessageConsumer(channel, handler),
                     consumerTag -> LOGGER.debug("Consumer cancelled: {}", consumerTag));
 
@@ -247,17 +255,20 @@ public class RabbitMQTransport implements Transport {
     public void subscribeUnicast(String channelName, String instanceId, BiConsumer<String, byte[]> handler) {
         try {
             String exchangeName = "conduit.direct." + channelName;
-            channel.exchangeDeclare(exchangeName, BuiltinExchangeType.DIRECT, true);
+
+            synchronized (publishLock) {
+                ensureExchange(exchangeName, BuiltinExchangeType.DIRECT);
+            }
 
             // Create queue with instanceId as routing key
             String queueName = "conduit.unicast." + channelName + "." + instanceId;
-            channel.queueDeclare(queueName, false, false, true, null);
-            channel.queueBind(queueName, exchangeName, instanceId);
+            consumeChannel.queueDeclare(queueName, false, false, true, null);
+            consumeChannel.queueBind(queueName, exchangeName, instanceId);
 
             queueNames.put(channelName + ":" + instanceId, queueName);
 
             // Setup consumer
-            channel.basicConsume(queueName, true,
+            consumeChannel.basicConsume(queueName, true,
                     new MessageConsumer(channelName, handler),
                     consumerTag -> LOGGER.debug("Consumer cancelled: {}", consumerTag));
 
@@ -273,7 +284,7 @@ public class RabbitMQTransport implements Transport {
         String queueName = queueNames.remove(channelName);
         if (queueName != null) {
             try {
-                channel.queueDelete(queueName);
+                consumeChannel.queueDelete(queueName);
                 LOGGER.info("Unsubscribed from channel: {}", channelName);
             } catch (IOException e) {
                 LOGGER.error("Failed to unsubscribe from channel: {}", channelName, e);
@@ -293,13 +304,31 @@ public class RabbitMQTransport implements Transport {
 
     @Override
     public void close() throws Exception {
-        if (channel != null && channel.isOpen()) {
-            channel.close();
+        if (consumeChannel != null && consumeChannel.isOpen()) {
+            consumeChannel.close();
+        }
+        if (publishChannel != null && publishChannel.isOpen()) {
+            publishChannel.close();
         }
         if (connection != null && connection.isOpen()) {
             connection.close();
         }
         LOGGER.info("RabbitMQ transport closed");
+    }
+
+    /**
+     * Declares an exchange only if it has not been declared before in this session.
+     * Avoids redundant round-trips to the broker for every message.
+     * Must be called while holding {@code publishLock}.
+     *
+     * @param name the exchange name
+     * @param type the exchange type
+     * @throws IOException if the declaration fails
+     */
+    private void ensureExchange(String name, BuiltinExchangeType type) throws IOException {
+        if (declaredExchanges.add(name)) {
+            publishChannel.exchangeDeclare(name, type, true);
+        }
     }
 
     // ===== Inner Classes =====
