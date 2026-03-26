@@ -23,14 +23,50 @@ A lightweight, high-performance Java messaging library for distributed microserv
 
 ### Installation
 
-Add the dependency to your `build.gradle`:
+#### Recommended: using the BOM
+
+Import `conduit-bom` to manage all module and dependency versions centrally:
+
+**Gradle (Kotlin DSL):**
+```kotlin
+dependencies {
+    implementation(platform("fr.traqueur.conduit:conduit-bom:1.1.0"))
+    implementation("fr.traqueur.conduit:conduit-redis")      // Redis transport
+    // OR
+    implementation("fr.traqueur.conduit:conduit-rabbitmq")  // RabbitMQ transport
+}
+```
+
+**Maven:**
+```xml
+<dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>fr.traqueur.conduit</groupId>
+      <artifactId>conduit-bom</artifactId>
+      <version>1.1.0</version>
+      <type>pom</type>
+      <scope>import</scope>
+    </dependency>
+  </dependencies>
+</dependencyManagement>
+
+<dependencies>
+  <dependency>
+    <groupId>fr.traqueur.conduit</groupId>
+    <artifactId>conduit-redis</artifactId>
+  </dependency>
+</dependencies>
+```
+
+#### Without BOM
 
 ```gradle
 dependencies {
     // Choose your transport (conduit-core is included transitively)
-    implementation 'fr.traqueur.conduit:conduit-redis:1.0.0'
+    implementation 'fr.traqueur.conduit:conduit-redis:1.1.0'
     // OR
-    implementation 'fr.traqueur.conduit:conduit-rabbitmq:1.0.0'
+    implementation 'fr.traqueur.conduit:conduit-rabbitmq:1.1.0'
 }
 ```
 
@@ -69,15 +105,13 @@ Conduit conduit = Conduit.builder()
 #### 3. Register Packets and Handlers
 
 ```java
-import fr.traqueur.conduit.handler.HandlerResult;
-
 // Register packet type
 conduit.registerPacket(ChatMessagePacket.class);
 
 // Register handler for incoming messages
 conduit.registerHandler(ChatMessagePacket.class, (packet, ackCallback) -> {
     System.out.println("Received: " + packet.message());
-    return HandlerResult.SUCCESS;
+    return null; // null = sync completion
 });
 
 // Start listening
@@ -109,7 +143,7 @@ new EventPacket("USER_LOGIN", "user123").send();
 conduit.registerPacket(EventPacket.class);
 conduit.registerHandler(EventPacket.class, (packet, ackCallback) -> {
     System.out.println("Event: " + packet.eventType());
-    return HandlerResult.SUCCESS;
+    return null;
 });
 ```
 
@@ -154,11 +188,10 @@ conduit.registerHandler(ConfigReloadPacket.class, (packet, ackCallback) -> {
     try {
         // Reload configuration...
         ackCallback.accept(AckResponse.success(packet.toString(), "Config loaded"));
-        return HandlerResult.SUCCESS;
     } catch (Exception e) {
         ackCallback.accept(AckResponse.failure(packet.toString(), e.getMessage()));
-        return HandlerResult.ERROR;
     }
+    return null;
 });
 ```
 
@@ -308,13 +341,12 @@ conduit.registerHandler(MyPacket.class, (packet, ackCallback) -> {
         if (ackCallback != null) {
             ackCallback.accept(AckResponse.success("id", "Processed"));
         }
-        return HandlerResult.SUCCESS;
     } catch (Exception e) {
         if (ackCallback != null) {
             ackCallback.accept(AckResponse.failure("id", e.getMessage()));
         }
-        return HandlerResult.ERROR;
     }
+    return null;
 });
 ```
 
