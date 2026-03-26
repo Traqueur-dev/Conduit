@@ -4,7 +4,6 @@ import fr.traqueur.conduit.compression.GzipCompressor;
 import fr.traqueur.conduit.compression.NoOpCompressor;
 import fr.traqueur.conduit.core.BaseConduitIntegrationTest;
 import fr.traqueur.conduit.core.Conduit;
-import fr.traqueur.conduit.handler.HandlerResult;
 import fr.traqueur.conduit.serialization.JsonSerializer;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Order;

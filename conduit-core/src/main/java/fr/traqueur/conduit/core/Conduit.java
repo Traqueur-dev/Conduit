@@ -1,9 +1,8 @@
 package fr.traqueur.conduit.core;
 
-import com.google.gson.Gson;
 import fr.traqueur.conduit.compression.Compressor;
 import fr.traqueur.conduit.compression.NoOpCompressor;
-import fr.traqueur.conduit.handler.HandlerResult;
+import fr.traqueur.conduit.handler.AsyncPacketHandler;
 import fr.traqueur.conduit.handler.PacketHandler;
 import fr.traqueur.conduit.packet.AcknowledgeablePacket;
 import fr.traqueur.conduit.packet.Packet;
@@ -24,17 +23,24 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /**
  * Main entry point for the Conduit messaging system.
  * Manages packet sending, receiving, and acknowledgments.
+ *
+ * <p>Multiple named instances are supported via {@link #getInstance(String)}.
+ * The first instance built (or the one built without a name) becomes the default
+ * instance returned by {@link #getInstance()}.</p>
  *
  * @author Traqueur
  */
 public class Conduit {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(Conduit.class);
-    private static Conduit instance;
+
+    private static final Map<String, Conduit> instances = new ConcurrentHashMap<>();
+    private static volatile Conduit defaultInstance;
 
     private final Transport transport;
     private final Serializer serializer;
@@ -43,6 +49,7 @@ public class Conduit {
     private final HandlerRegistry handlerRegistry;
     private final String defaultChannel;
     private final String instanceId;
+    private final String registryKey;
 
     private final Set<String> channelsToSubscribe = ConcurrentHashMap.newKeySet();
 
@@ -50,7 +57,8 @@ public class Conduit {
                     Serializer serializer,
                     Compressor compressor,
                     String defaultChannel,
-                    String instanceId) {
+                    String instanceId,
+                    String registryKey) {
         this.transport = transport;
         this.serializer = serializer;
         this.compressor = compressor;
@@ -58,31 +66,42 @@ public class Conduit {
         this.handlerRegistry = new HandlerRegistry();
         this.defaultChannel = defaultChannel;
         this.instanceId = instanceId;
+        this.registryKey = registryKey;
 
         LOGGER.info("Conduit initialized with transport: {}, serializer: {}, compressor: {}",
                 transport.getType(), serializer.getType(), compressor.getType());
     }
 
     /**
-     * Gets the singleton instance.
+     * Gets the default Conduit instance (the first one built).
      *
-     * @return the Conduit instance
-     * @throws IllegalStateException if Conduit is not initialized
+     * @return the default Conduit instance
+     * @throws IllegalStateException if no Conduit has been initialized
      */
     public static Conduit getInstance() {
-        if (instance == null) {
+        if (defaultInstance == null) {
             throw new IllegalStateException("Conduit is not initialized. Call Conduit.builder().build() first.");
         }
-        return instance;
+        return defaultInstance;
+    }
+
+    /**
+     * Gets a named Conduit instance.
+     *
+     * @param name the instance name specified in the builder via {@code .name(String)}
+     * @return the Conduit instance with the given name
+     * @throws IllegalArgumentException if no instance with that name exists
+     */
+    public static Conduit getInstance(String name) {
+        Conduit conduit = instances.get(name);
+        if (conduit == null) {
+            throw new IllegalArgumentException("No Conduit instance named: " + name);
+        }
+        return conduit;
     }
 
     // ===== Registration Methods =====
 
-    /**
-     * Registers a packet type.
-     *
-     * @param packetClass the packet class to register
-     */
     /**
      * Registers a packet type.
      *
@@ -111,6 +130,24 @@ public class Conduit {
         handlerRegistry.registerHandler(packetClass, handler);
         LOGGER.debug("Registered handler for: {}", packetClass.getSimpleName());
     }
+
+    /**
+     * Registers an asynchronous packet handler.
+     * The handler returns a {@link CompletableFuture} to allow non-blocking processing.
+     *
+     * <p>Conduit does not provide a default executor. Supply your own via
+     * {@link java.util.concurrent.CompletableFuture#runAsync(Runnable, java.util.concurrent.Executor)}
+     * inside the handler to control which thread pool is used.</p>
+     *
+     * @param <T>         the packet type
+     * @param packetClass the packet class
+     * @param handler     the async handler to register
+     */
+    public <T extends Packet> void registerAsyncHandler(Class<T> packetClass, AsyncPacketHandler<T> handler) {
+        handlerRegistry.registerAsyncHandler(packetClass, handler);
+        LOGGER.debug("Registered async handler for: {}", packetClass.getSimpleName());
+    }
+
     // ===== Send Methods (called by Packet interfaces) =====
 
     /**
@@ -265,10 +302,16 @@ public class Conduit {
 
     /**
      * Shuts down Conduit and closes all resources.
+     * Removes this instance from the registry and clears the default instance if applicable.
      */
     public void shutdown() {
         try {
             LOGGER.info("Shutting down Conduit...");
+
+            instances.remove(registryKey);
+            if (defaultInstance == this) {
+                defaultInstance = null;
+            }
 
             transport.close();
 
@@ -276,6 +319,21 @@ public class Conduit {
         } catch (Exception e) {
             LOGGER.error("Error during shutdown", e);
         }
+    }
+
+    /**
+     * Shuts down all Conduit instances and clears the registry.
+     * Package-private: intended for use in tests only.
+     */
+    static void resetAll() {
+        for (Conduit conduit : instances.values()) {
+            try {
+                conduit.transport.close();
+            } catch (Exception ignored) {
+            }
+        }
+        instances.clear();
+        defaultInstance = null;
     }
 
     private byte[] wrapPacket(Packet packet, boolean requiresAck, String ackId) throws Exception {
@@ -317,6 +375,7 @@ public class Conduit {
      *
      * @param channel the channel the packet was received on
      * @param data the raw packet data
+     * @param isBroadcast whether the packet was received on a broadcast channel
      */
     private void handleIncomingPacket(String channel, byte[] data, boolean isBroadcast) {
         try {
@@ -344,36 +403,48 @@ public class Conduit {
                 return;
             }
 
+            // Guard against empty payload
+            if (envelope.payload() == null || envelope.payload().length == 0) {
+                LOGGER.warn("Received packet with empty payload: {}", envelope.packetType());
+                return;
+            }
+
             // Deserialize packet
             Packet packet = decompressAndDeserialize(envelope.payload(), packetClass);
 
-            // Dispatch to handler
-            if (envelope.requiresAck()) {
-                // Capture metadata for ACK response
-                Map<String, String> metadata = envelope.metadata();
+            // Dispatch to handler asynchronously
+            final String finalChannel = channel;
+            final String ackId = envelope.ackId();
+            final Map<String, String> metadata = envelope.metadata();
+            final boolean requiresAck = envelope.requiresAck();
+            final String packetTypeName = packetClass.getSimpleName();
 
-                HandlerResult result = handlerRegistry.dispatch(packet, ackResponse -> {
-                    sendAckResponse(channel, envelope.ackId(), ackResponse, metadata);
-                });
+            Consumer<AckResponse> ackCallback = requiresAck
+                    ? ackResponse -> sendAckResponse(finalChannel, ackId, ackResponse, metadata)
+                    : null;
 
-                if (result == HandlerResult.CANT_HANDLE) {
-                    sendAckResponse(channel, envelope.ackId(),
-                            AckResponse.failure(envelope.ackId(), "No handler registered"), metadata);
-                }
-            } else {
-                handlerRegistry.dispatch(packet, null);
-            }
+            handlerRegistry.dispatchAsync(packet, ackCallback)
+                    .whenComplete((handled, error) -> {
+                        if (error != null) {
+                            if (requiresAck) {
+                                sendAckResponse(finalChannel, ackId,
+                                        AckResponse.failure(ackId, error.getMessage()), metadata);
+                            } else {
+                                LOGGER.warn("Async handler failed for packet {}", packetTypeName, error);
+                            }
+                        } else if (!handled && requiresAck) {
+                            sendAckResponse(finalChannel, ackId,
+                                    AckResponse.failure(ackId, "No handler registered"), metadata);
+                        }
+                    });
 
-            LOGGER.debug("Handled packet: {}", packetClass.getSimpleName());
+            LOGGER.debug("Dispatched packet: {}", packetTypeName);
 
         } catch (Exception e) {
             LOGGER.error("Failed to handle incoming packet", e);
         }
     }
 
-    /**
-     * Sends an ACK response back to the sender.
-     */
     /**
      * Sends an ACK response back to the sender.
      */
@@ -427,6 +498,7 @@ public class Conduit {
         private Compressor compressor = new NoOpCompressor(); // Default
         private String defaultChannel = "conduit:packets"; // Default
         private String instanceId = UUID.randomUUID().toString(); // Default random
+        private String name = null; // Optional name for registry lookup
 
         private ConduitBuilder() {
         }
@@ -492,6 +564,19 @@ public class Conduit {
         }
 
         /**
+         * Sets the optional name for this instance in the registry.
+         * Allows retrieval via {@link Conduit#getInstance(String)}.
+         * If not set, the instanceId is used as the registry key.
+         *
+         * @param name the registry name
+         * @return this builder
+         */
+        public ConduitBuilder name(String name) {
+            this.name = name;
+            return this;
+        }
+
+        /**
          * Builds and initializes the Conduit instance.
          *
          * @return the initialized Conduit instance
@@ -502,19 +587,24 @@ public class Conduit {
                 throw new IllegalStateException("Transport must be set");
             }
 
-            if (Conduit.instance != null) {
-                LOGGER.warn("Conduit instance already exists, replacing it");
-            }
+            String registryKey = (name != null) ? name : instanceId;
 
-            Conduit.instance = new Conduit(
+            Conduit conduit = new Conduit(
                     transport,
                     serializer,
                     compressor,
                     defaultChannel,
-                    instanceId
+                    instanceId,
+                    registryKey
             );
 
-            return Conduit.instance;
+            instances.put(registryKey, conduit);
+
+            if (defaultInstance == null) {
+                defaultInstance = conduit;
+            }
+
+            return conduit;
         }
     }
 }
