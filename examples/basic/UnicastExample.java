@@ -59,6 +59,7 @@ public class UnicastExample {
     private static void registerHandler(Conduit conduit, String instanceName) {
         conduit.registerHandler(DirectMessagePacket.class, (packet, ackCallback) -> {
             System.out.println(instanceName + " received: " + packet.message());
+            return null;
         });
     }
 

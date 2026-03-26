@@ -28,6 +28,7 @@ public class SimpleBroadcastExample {
         // Register handler on receiver
         receiver.registerHandler(ChatMessagePacket.class, (packet, ackCallback) -> {
             System.out.println("Received message from " + packet.senderId() + ": " + packet.message());
+            return null;
         });
 
         // Start both instances

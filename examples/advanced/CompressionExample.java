@@ -44,8 +44,10 @@ public class CompressionExample {
         sender.registerPacket(LargeDataPacket.class);
         receiver.registerPacket(LargeDataPacket.class);
 
-        receiver.registerHandler(LargeDataPacket.class, (packet, ackCallback) ->
-            System.out.println("Received payload of length: " + packet.data().length()));
+        receiver.registerHandler(LargeDataPacket.class, (packet, ackCallback) -> {
+            System.out.println("Received payload of length: " + packet.data().length());
+            return null;
+        });
 
         sender.start();
         receiver.start();

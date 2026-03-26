@@ -29,12 +29,15 @@ public class MultiTransportExample {
         rabbitInstance.registerPacket(EventPacket.class);
 
         // Register handler on Redis instance
-        redisInstance.registerHandler(EventPacket.class, (packet, ackCallback) ->
-            System.out.println("[Redis Instance] Received: " + packet.eventType() + " - " + packet.data()));
-
+        redisInstance.registerHandler(EventPacket.class, (packet, ackCallback) -> {
+            System.out.println("[Redis Instance] Received: " + packet.eventType() + " - " + packet.data());
+            return null;
+        });
         // Register handler on RabbitMQ instance
-        rabbitInstance.registerHandler(EventPacket.class, (packet, ackCallback) ->
-            System.out.println("[RabbitMQ Instance] Received: " + packet.eventType() + " - " + packet.data()));
+        rabbitInstance.registerHandler(EventPacket.class, (packet, ackCallback) -> {
+            System.out.println("[RabbitMQ Instance] Received: " + packet.eventType() + " - " + packet.data());
+            return null;
+        });
 
         // Start both
         redisInstance.start();

@@ -53,6 +53,7 @@ public class LoadBalancingExample {
                         ackCallback.accept(AckResponse.failure(String.valueOf(packet.taskId()), e.getMessage()));
                     }
                 }
+                return null;
             });
 
             worker.start();

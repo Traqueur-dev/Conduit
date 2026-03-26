@@ -46,34 +46,50 @@ public class PubSubPatternExample {
 
         // Order processor - subscribes to order events
         registerAllPackets(orderProcessor);
-        orderProcessor.registerHandler(OrderCreatedEvent.class, (packet, ackCallback) ->
-            System.out.println("[Order Processor] New order: " + packet.orderId() + " ($" + packet.amount() + ")"));
-        orderProcessor.registerHandler(OrderShippedEvent.class, (packet, ackCallback) ->
+        orderProcessor.registerHandler(OrderCreatedEvent.class, (packet, ackCallback) -> {
+            System.out.println("[Order Processor] New order: " + packet.orderId() + " ($" + packet.amount() + ")");
+            return null;
+        });
+        orderProcessor.registerHandler(OrderShippedEvent.class, (packet, ackCallback) -> {
             System.out.println("[Order Processor] Order shipped: " + packet.orderId() +
-                    " (Tracking: " + packet.trackingNumber() + ")"));
+                    " (Tracking: " + packet.trackingNumber() + ")");
+            return null;
+        });
 
         // Inventory manager - subscribes to inventory events
         registerAllPackets(inventoryManager);
-        inventoryManager.registerHandler(InventoryUpdatedEvent.class, (packet, ackCallback) ->
+        inventoryManager.registerHandler(InventoryUpdatedEvent.class, (packet, ackCallback) -> {
             System.out.println("[Inventory Manager] Stock updated: Product " + packet.productId() +
-                    " = " + packet.quantity() + " units"));
+                    " = " + packet.quantity() + " units");
+            return null;
+        });
 
         // Notification service - subscribes to notification events
         registerAllPackets(notificationService);
-        notificationService.registerHandler(NotificationEvent.class, (packet, ackCallback) ->
+        notificationService.registerHandler(NotificationEvent.class, (packet, ackCallback) -> {
             System.out.println("[Notification Service] Sending to user " + packet.userId() +
-                    ": " + packet.message()));
+                    ": " + packet.message());
+            return null;
+        });
 
         // Analytics service - subscribes to ALL events
         registerAllPackets(analyticsService);
-        analyticsService.registerHandler(OrderCreatedEvent.class, (packet, ackCallback) ->
-            System.out.println("[Analytics] Logged order event"));
-        analyticsService.registerHandler(OrderShippedEvent.class, (packet, ackCallback) ->
-            System.out.println("[Analytics] Logged shipping event"));
-        analyticsService.registerHandler(InventoryUpdatedEvent.class, (packet, ackCallback) ->
-            System.out.println("[Analytics] Logged inventory event"));
-        analyticsService.registerHandler(NotificationEvent.class, (packet, ackCallback) ->
-            System.out.println("[Analytics] Logged notification event"));
+        analyticsService.registerHandler(OrderCreatedEvent.class, (packet, ackCallback) -> {
+            System.out.println("[Analytics] Logged order event");
+            return null;
+        });
+        analyticsService.registerHandler(OrderShippedEvent.class, (packet, ackCallback) -> {
+            System.out.println("[Analytics] Logged shipping event");
+            return null;
+        });
+        analyticsService.registerHandler(InventoryUpdatedEvent.class, (packet, ackCallback) -> {
+            System.out.println("[Analytics] Logged inventory event");
+            return null;
+        });
+        analyticsService.registerHandler(NotificationEvent.class, (packet, ackCallback) -> {
+            System.out.println("[Analytics] Logged notification event");
+            return null;
+        });
 
         // Start all services
         List<Conduit> services = List.of(

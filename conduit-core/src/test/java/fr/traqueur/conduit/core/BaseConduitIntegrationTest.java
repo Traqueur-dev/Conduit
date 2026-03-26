@@ -99,6 +99,7 @@ public abstract class BaseConduitIntegrationTest {
         conduit2.registerHandler(ChatMessagePacket.class, (packet, ackCallback) -> {
             receivedPacket.set(packet);
             latch.countDown();
+            return null;
         });
 
         Thread.sleep(1000);
@@ -125,6 +126,7 @@ public abstract class BaseConduitIntegrationTest {
         conduit2.registerHandler(PlayerJoinPacket.class, (packet, ackCallback) -> {
             receivedPacket.set(packet);
             latch.countDown();
+            return null;
         });
 
         Thread.sleep(1000);
@@ -149,10 +151,12 @@ public abstract class BaseConduitIntegrationTest {
 
         conduit1.registerHandler(PlayerKickPacket.class, (packet, ackCallback) -> {
             latch1.countDown();
+            return null;
         });
 
         conduit2.registerHandler(PlayerKickPacket.class, (packet, ackCallback) -> {
             latch2.countDown();
+            return null;
         });
 
         Thread.sleep(1000);
@@ -174,11 +178,10 @@ public abstract class BaseConduitIntegrationTest {
 
         conduit2.registerHandler(ConfigReloadPacket.class, (packet, ackCallback) -> {
             handlerLatch.countDown();
-
             if (ackCallback != null) {
-                AckResponse ack = AckResponse.success("config-123", "Config reloaded successfully");
-                ackCallback.accept(ack);
+                ackCallback.accept(AckResponse.success("config-123", "Config reloaded successfully"));
             }
+            return null;
         });
 
         Thread.sleep(1000);
@@ -210,11 +213,10 @@ public abstract class BaseConduitIntegrationTest {
 
         conduit2.registerHandler(DataSyncPacket.class, (packet, ackCallback) -> {
             handlerLatch.countDown();
-
             if (ackCallback != null) {
-                AckResponse ack = AckResponse.success("sync-456", "Data synced: " + packet.data());
-                ackCallback.accept(ack);
+                ackCallback.accept(AckResponse.success("sync-456", "Data synced: " + packet.data()));
             }
+            return null;
         });
 
         Thread.sleep(1000);
@@ -265,10 +267,12 @@ public abstract class BaseConduitIntegrationTest {
 
         conduit1.registerHandler(ChatMessagePacket.class, (packet, ackCallback) -> {
             latch1.countDown();
+            return null;
         });
 
         conduit2.registerHandler(ChatMessagePacket.class, (packet, ackCallback) -> {
             latch2.countDown();
+            return null;
         });
 
         Thread.sleep(1000);
@@ -303,6 +307,7 @@ public abstract class BaseConduitIntegrationTest {
         conduit2.registerHandler(ChatMessagePacket.class, (packet, ackCallback) -> {
             receivedPacket.set(packet);
             latch.countDown();
+            return null;
         });
 
         Thread.sleep(1000);
@@ -327,7 +332,7 @@ public abstract class BaseConduitIntegrationTest {
         String mainThread = Thread.currentThread().getName();
         CountDownLatch handlerLatch = new CountDownLatch(1);
 
-        conduit2.registerAsyncHandler(ConfigReloadPacket.class, (packet, ackCallback) ->
+        conduit2.registerHandler(ConfigReloadPacket.class, (packet, ackCallback) ->
             CompletableFuture.runAsync(() -> {
                 handlerThread.set(Thread.currentThread().getName());
                 if (ackCallback != null) {

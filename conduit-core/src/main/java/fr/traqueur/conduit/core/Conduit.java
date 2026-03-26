@@ -2,7 +2,6 @@ package fr.traqueur.conduit.core;
 
 import fr.traqueur.conduit.compression.Compressor;
 import fr.traqueur.conduit.compression.NoOpCompressor;
-import fr.traqueur.conduit.handler.AsyncPacketHandler;
 import fr.traqueur.conduit.handler.PacketHandler;
 import fr.traqueur.conduit.packet.AcknowledgeablePacket;
 import fr.traqueur.conduit.packet.Packet;
@@ -129,23 +128,6 @@ public class Conduit {
     public <T extends Packet> void registerHandler(Class<T> packetClass, PacketHandler<T> handler) {
         handlerRegistry.registerHandler(packetClass, handler);
         LOGGER.debug("Registered handler for: {}", packetClass.getSimpleName());
-    }
-
-    /**
-     * Registers an asynchronous packet handler.
-     * The handler returns a {@link CompletableFuture} to allow non-blocking processing.
-     *
-     * <p>Conduit does not provide a default executor. Supply your own via
-     * {@link java.util.concurrent.CompletableFuture#runAsync(Runnable, java.util.concurrent.Executor)}
-     * inside the handler to control which thread pool is used.</p>
-     *
-     * @param <T>         the packet type
-     * @param packetClass the packet class
-     * @param handler     the async handler to register
-     */
-    public <T extends Packet> void registerAsyncHandler(Class<T> packetClass, AsyncPacketHandler<T> handler) {
-        handlerRegistry.registerAsyncHandler(packetClass, handler);
-        LOGGER.debug("Registered async handler for: {}", packetClass.getSimpleName());
     }
 
     // ===== Send Methods (called by Packet interfaces) =====
@@ -423,7 +405,7 @@ public class Conduit {
                     ? ackResponse -> sendAckResponse(finalChannel, ackId, ackResponse, metadata)
                     : null;
 
-            handlerRegistry.dispatchAsync(packet, ackCallback)
+            handlerRegistry.dispatch(packet, ackCallback)
                     .whenComplete((handled, error) -> {
                         if (error != null) {
                             if (requiresAck) {

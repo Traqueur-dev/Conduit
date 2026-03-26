@@ -48,6 +48,7 @@ public class AcknowledgmentExample {
                     ackCallback.accept(ack);
                 }
             }
+            return null;
         });
 
         // Start both instances
