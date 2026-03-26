@@ -5,7 +5,7 @@ plugins {
 
 allprojects {
     group = "fr.traqueur.conduit"
-    version = "1.0.0"
+    version = "1.1.0"
 
     extra.set("classifier", System.getProperty("archive.classifier"))
     extra.set("sha", System.getProperty("github.sha"))
