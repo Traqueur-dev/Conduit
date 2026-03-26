@@ -8,9 +8,9 @@ Conduit is a Java messaging system for distributed communication across microser
 
 **Key Concepts:**
 - **Packets**: Records implementing the `Packet` interface that define message structure
-- **Conduit**: Main singleton managing packet routing, serialization, and transport
+- **Conduit**: Multi-instance registry managing packet routing, serialization, and transport (supports multiple named instances)
 - **Transport**: Abstraction for different messaging backends (Redis PubSub, RabbitMQ exchanges)
-- **Handlers**: Callbacks registered to process incoming packets
+- **Handlers**: Callbacks registered to process incoming packets (sync `PacketHandler` or async `AsyncPacketHandler`)
 - **Channels**: Logical message routing paths, either default or custom via `@PacketMeta` annotation
 
 ## Project Structure
@@ -55,11 +55,12 @@ This is a Gradle multi-module project with three modules:
 
 ### Initialization Flow
 
-1. Create `Conduit` instance via builder with chosen transport
+1. Create `Conduit` instance via builder with chosen transport (optional `.name()` for registry lookup)
 2. Register packet types via `registerPacket()`
-3. Register handlers via `registerHandler()`
+3. Register handlers via `registerHandler()` or `registerAsyncHandler()`
 4. Call `start()` to connect transport and subscribe to channels
 5. Send/receive packets via `send()`, `sendTo()`, `sendWithAck()`
+6. On shutdown, call `shutdown()` (removes instance from registry)
 
 ### Packet Lifecycle
 
@@ -74,9 +75,10 @@ This is a Gradle multi-module project with three modules:
 1. `Transport` receives raw bytes from channel
 2. `Conduit.handleIncomingPacket()` deserializes envelope
 3. Checks if packet is from self (ignores broadcast loops)
-4. Deserializes packet payload to registered packet class
-5. Dispatches to registered `PacketHandler`
-6. If ACK required, sends response back to sender
+4. Guards against empty payload (WARN log)
+5. Deserializes packet payload to registered packet class
+6. Dispatches to registered `PacketHandler` or `AsyncPacketHandler` (via `dispatchAsync`)
+7. If ACK required, sends response back to sender; if no handler, sends automatic NACK
 
 ### Transport Implementations
 
@@ -96,8 +98,8 @@ This is a Gradle multi-module project with three modules:
 
 ### Key Design Patterns
 
-- **Singleton**: `Conduit` is a singleton accessed via `getInstance()`
-- **Builder**: `Conduit.builder()` for flexible configuration
+- **Registry**: `Conduit` instances are stored in a static `ConcurrentHashMap`; first built becomes `defaultInstance`. Named instances retrieved via `getInstance(String)`.
+- **Builder**: `Conduit.builder()` for flexible configuration, with optional `.name(String)` for registry key
 - **Template Method**: `Transport` interface with default `sendAckResponse()` method
 - **Registry**: `PacketRegistry` and `HandlerRegistry` for type-safe packet/handler lookup
 - **Envelope Pattern**: `PacketEnvelope` wraps packets with metadata and routing info
@@ -131,7 +133,10 @@ conduit-core (no dependencies)
 2. **ACK routing**: Each transport implements custom ACK routing via metadata (Redis uses temporary channels, RabbitMQ uses reply queues)
 3. **Channel subscription**: Channels are subscribed at `start()` time, including default channel + any custom channels from `@PacketMeta`
 4. **Async operations**: Redis transport uses fully async operations with `CompletableFuture`, RabbitMQ uses blocking operations internally
-5. **Error handling**: Handlers return `HandlerResult` to indicate success/failure; if no handler exists, automatic NACK is sent
+5. **Error handling**: `PacketHandler` is void; if no handler exists, automatic NACK is sent. `AsyncPacketHandler` returns `CompletableFuture<Void>`; exceptions cause NACK.
+6. **Handler types**: Use `registerHandler()` for synchronous handlers, `registerAsyncHandler()` for async. No default executor provided — supply your own via `CompletableFuture.runAsync(..., executor)`.
+7. **Multi-instance**: `Conduit.resetAll()` (package-private) is available in tests via `BaseConduitIntegrationTest` to clear all instances between test runs.
+8. **RabbitMQ thread-safety**: Two separate channels (`consumeChannel`/`publishChannel`) with `publishLock` protecting all publish operations. Exchange declarations are cached in `declaredExchanges`.
 
 ## Maven Publishing
 
