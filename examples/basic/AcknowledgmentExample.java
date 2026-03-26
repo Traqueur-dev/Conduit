@@ -2,7 +2,6 @@ package examples.basic;
 
 import fr.traqueur.conduit.core.AckResponse;
 import fr.traqueur.conduit.core.Conduit;
-import fr.traqueur.conduit.handler.HandlerResult;
 import fr.traqueur.conduit.packet.AcknowledgeablePacket;
 import fr.traqueur.conduit.redis.RedisConfig;
 import fr.traqueur.conduit.redis.RedisTransport;
@@ -42,16 +41,12 @@ public class AcknowledgmentExample {
                     ackCallback.accept(ack);
                 }
 
-                return HandlerResult.SUCCESS;
-
             } catch (Exception e) {
                 // Send failure acknowledgment
                 if (ackCallback != null) {
                     AckResponse ack = AckResponse.failure(packet.taskId(), e.getMessage());
                     ackCallback.accept(ack);
                 }
-
-                return HandlerResult.ERROR;
             }
         });
 

@@ -1,7 +1,6 @@
 package examples.basic;
 
 import fr.traqueur.conduit.core.Conduit;
-import fr.traqueur.conduit.handler.HandlerResult;
 import fr.traqueur.conduit.packet.TargetablePacket;
 import fr.traqueur.conduit.redis.RedisConfig;
 import fr.traqueur.conduit.redis.RedisTransport;
@@ -60,7 +59,6 @@ public class UnicastExample {
     private static void registerHandler(Conduit conduit, String instanceName) {
         conduit.registerHandler(DirectMessagePacket.class, (packet, ackCallback) -> {
             System.out.println(instanceName + " received: " + packet.message());
-            return HandlerResult.SUCCESS;
         });
     }
 

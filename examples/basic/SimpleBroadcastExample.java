@@ -1,7 +1,6 @@
 package examples.basic;
 
 import fr.traqueur.conduit.core.Conduit;
-import fr.traqueur.conduit.handler.HandlerResult;
 import fr.traqueur.conduit.packet.Packet;
 import fr.traqueur.conduit.redis.RedisConfig;
 import fr.traqueur.conduit.redis.RedisTransport;
@@ -29,7 +28,6 @@ public class SimpleBroadcastExample {
         // Register handler on receiver
         receiver.registerHandler(ChatMessagePacket.class, (packet, ackCallback) -> {
             System.out.println("Received message from " + packet.senderId() + ": " + packet.message());
-            return HandlerResult.SUCCESS;
         });
 
         // Start both instances

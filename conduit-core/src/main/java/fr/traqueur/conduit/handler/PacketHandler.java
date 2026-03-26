@@ -17,10 +17,9 @@ public interface PacketHandler<T extends Packet> {
     
     /**
      * Handles a received packet.
-     * 
+     *
      * @param packet the received packet
      * @param ackCallback callback to send acknowledgment (null if packet doesn't require ACK)
-     * @return the result of handling the packet
      */
-    HandlerResult handle(T packet, Consumer<AckResponse> ackCallback);
+    void handle(T packet, Consumer<AckResponse> ackCallback);
 }

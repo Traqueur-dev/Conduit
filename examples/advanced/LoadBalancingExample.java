@@ -2,7 +2,6 @@ package examples.advanced;
 
 import fr.traqueur.conduit.core.AckResponse;
 import fr.traqueur.conduit.core.Conduit;
-import fr.traqueur.conduit.handler.HandlerResult;
 import fr.traqueur.conduit.packet.TargetableAcknowledgeablePacket;
 import fr.traqueur.conduit.redis.RedisConfig;
 import fr.traqueur.conduit.redis.RedisTransport;
@@ -49,13 +48,10 @@ public class LoadBalancingExample {
                     if (ackCallback != null) {
                         ackCallback.accept(AckResponse.success(String.valueOf(packet.taskId()), result));
                     }
-
-                    return HandlerResult.SUCCESS;
                 } catch (Exception e) {
                     if (ackCallback != null) {
                         ackCallback.accept(AckResponse.failure(String.valueOf(packet.taskId()), e.getMessage()));
                     }
-                    return HandlerResult.ERROR;
                 }
             });
 

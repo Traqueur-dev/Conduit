@@ -2,7 +2,6 @@ package examples.basic;
 
 import fr.traqueur.conduit.core.Conduit;
 import fr.traqueur.conduit.core.PacketMeta;
-import fr.traqueur.conduit.handler.HandlerResult;
 import fr.traqueur.conduit.packet.Packet;
 import fr.traqueur.conduit.redis.RedisConfig;
 import fr.traqueur.conduit.redis.RedisTransport;
@@ -42,30 +41,20 @@ public class CustomChannelExample {
         registerPackets(server2);
 
         // Register handlers on server2
-        server2.registerHandler(SystemPacket.class, (packet, ackCallback) -> {
-            System.out.println("[SYSTEM] " + packet.systemEvent());
-            return HandlerResult.SUCCESS;
-        });
+        server2.registerHandler(SystemPacket.class, (packet, ackCallback) ->
+            System.out.println("[SYSTEM] " + packet.systemEvent()));
 
-        server2.registerHandler(PlayerJoinPacket.class, (packet, ackCallback) -> {
-            System.out.println("[PLAYER] " + packet.playerName() + " joined");
-            return HandlerResult.SUCCESS;
-        });
+        server2.registerHandler(PlayerJoinPacket.class, (packet, ackCallback) ->
+            System.out.println("[PLAYER] " + packet.playerName() + " joined"));
 
-        server2.registerHandler(PlayerLeavePacket.class, (packet, ackCallback) -> {
-            System.out.println("[PLAYER] Player " + packet.playerId() + " left");
-            return HandlerResult.SUCCESS;
-        });
+        server2.registerHandler(PlayerLeavePacket.class, (packet, ackCallback) ->
+            System.out.println("[PLAYER] Player " + packet.playerId() + " left"));
 
-        server2.registerHandler(GameStartPacket.class, (packet, ackCallback) -> {
-            System.out.println("[GAME] Game " + packet.gameId() + " started with " + packet.playerCount() + " players");
-            return HandlerResult.SUCCESS;
-        });
+        server2.registerHandler(GameStartPacket.class, (packet, ackCallback) ->
+            System.out.println("[GAME] Game " + packet.gameId() + " started with " + packet.playerCount() + " players"));
 
-        server2.registerHandler(GameEndPacket.class, (packet, ackCallback) -> {
-            System.out.println("[GAME] Game " + packet.gameId() + " ended. Winner: " + packet.winner());
-            return HandlerResult.SUCCESS;
-        });
+        server2.registerHandler(GameEndPacket.class, (packet, ackCallback) ->
+            System.out.println("[GAME] Game " + packet.gameId() + " ended. Winner: " + packet.winner()));
 
         // Start both instances
         server1.start();
