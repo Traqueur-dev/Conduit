@@ -1,5 +1,11 @@
 package fr.traqueur.conduit.core;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.TypeAdapter;
+import com.google.gson.stream.JsonReader;
+import com.google.gson.stream.JsonWriter;
+
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -25,7 +31,21 @@ import java.util.Map;
  * @author Traqueur
  */
 public class PacketEnvelope {
-    
+
+    private static final Gson GSON = new GsonBuilder()
+            .registerTypeAdapter(Instant.class, new TypeAdapter<Instant>() {
+                @Override
+                public void write(JsonWriter out, Instant value) throws IOException {
+                    out.value(value.toString());
+                }
+
+                @Override
+                public Instant read(JsonReader in) throws IOException {
+                    return Instant.parse(in.nextString());
+                }
+            })
+            .create();
+
     private final String packetType;
     private final byte[] payload;
     private final boolean requiresAck;
@@ -112,8 +132,10 @@ public class PacketEnvelope {
 
     /**
      * Gets the metadata map for transport-specific routing information.
+     * <p><strong>Note:</strong> This map is intentionally mutable. Transport implementations
+     * inject routing metadata (e.g., replyTo, correlationId) after deserialization.</p>
      *
-     * @return the metadata map
+     * @return the mutable metadata map
      */
     public Map<String, String> metadata() { return metadata; }
 
@@ -238,69 +260,10 @@ public class PacketEnvelope {
     }
     
     private static String serializeAckResponse(AckResponse ackResponse) {
-        // Simple JSON serialization
-        return String.format(
-            "{\"packetId\":\"%s\",\"success\":%b,\"message\":\"%s\",\"timestamp\":\"%s\"}",
-            escape(ackResponse.packetId()),
-            ackResponse.success(),
-            escape(ackResponse.message()),
-            ackResponse.timestamp().toString()
-        );
+        return GSON.toJson(ackResponse);
     }
-    
+
     private static AckResponse deserializeAckResponse(String json) {
-        // Simple JSON deserialization (you could use Gson here if needed)
-        try {
-            // Extract values using simple parsing
-            String packetId = extractJsonValue(json, "packetId");
-            boolean success = Boolean.parseBoolean(extractJsonValue(json, "success"));
-            String message = extractJsonValue(json, "message");
-            String timestamp = extractJsonValue(json, "timestamp");
-            
-            return new AckResponse(
-                packetId,
-                success,
-                message,
-                Instant.parse(timestamp)
-            );
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to deserialize AckResponse", e);
-        }
-    }
-    
-    private static String extractJsonValue(String json, String key) {
-        String pattern = "\"" + key + "\":";
-        int start = json.indexOf(pattern);
-        if (start == -1) return null;
-        
-        start += pattern.length();
-        
-        // Skip whitespace
-        while (start < json.length() && Character.isWhitespace(json.charAt(start))) {
-            start++;
-        }
-        
-        if (json.charAt(start) == '"') {
-            // String value
-            start++;
-            int end = json.indexOf('"', start);
-            return json.substring(start, end);
-        } else {
-            // Boolean/number value
-            int end = start;
-            while (end < json.length() && json.charAt(end) != ',' && json.charAt(end) != '}') {
-                end++;
-            }
-            return json.substring(start, end).trim();
-        }
-    }
-    
-    private static String escape(String str) {
-        if (str == null) return "";
-        return str.replace("\\", "\\\\")
-                  .replace("\"", "\\\"")
-                  .replace("\n", "\\n")
-                  .replace("\r", "\\r")
-                  .replace("\t", "\\t");
+        return GSON.fromJson(json, AckResponse.class);
     }
 }
