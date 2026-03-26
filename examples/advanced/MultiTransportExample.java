@@ -1,7 +1,6 @@
 package examples.advanced;
 
 import fr.traqueur.conduit.core.Conduit;
-import fr.traqueur.conduit.handler.HandlerResult;
 import fr.traqueur.conduit.packet.Packet;
 import fr.traqueur.conduit.rabbitmq.RabbitMQConfig;
 import fr.traqueur.conduit.rabbitmq.RabbitMQTransport;
@@ -32,13 +31,12 @@ public class MultiTransportExample {
         // Register handler on Redis instance
         redisInstance.registerHandler(EventPacket.class, (packet, ackCallback) -> {
             System.out.println("[Redis Instance] Received: " + packet.eventType() + " - " + packet.data());
-            return HandlerResult.SUCCESS;
+            return null;
         });
-
         // Register handler on RabbitMQ instance
         rabbitInstance.registerHandler(EventPacket.class, (packet, ackCallback) -> {
             System.out.println("[RabbitMQ Instance] Received: " + packet.eventType() + " - " + packet.data());
-            return HandlerResult.SUCCESS;
+            return null;
         });
 
         // Start both

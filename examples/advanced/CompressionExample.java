@@ -3,7 +3,6 @@ package examples.advanced;
 import fr.traqueur.conduit.compression.GzipCompressor;
 import fr.traqueur.conduit.compression.NoOpCompressor;
 import fr.traqueur.conduit.core.Conduit;
-import fr.traqueur.conduit.handler.HandlerResult;
 import fr.traqueur.conduit.packet.Packet;
 import fr.traqueur.conduit.redis.RedisConfig;
 import fr.traqueur.conduit.redis.RedisTransport;
@@ -47,7 +46,7 @@ public class CompressionExample {
 
         receiver.registerHandler(LargeDataPacket.class, (packet, ackCallback) -> {
             System.out.println("Received payload of length: " + packet.data().length());
-            return HandlerResult.SUCCESS;
+            return null;
         });
 
         sender.start();

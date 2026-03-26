@@ -1,11 +1,13 @@
 package fr.traqueur.conduit.registry;
 
 import fr.traqueur.conduit.core.AckResponse;
-import fr.traqueur.conduit.handler.HandlerResult;
 import fr.traqueur.conduit.handler.PacketHandler;
 import fr.traqueur.conduit.packet.Packet;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
@@ -16,6 +18,8 @@ import java.util.function.Consumer;
  * @author Traqueur
  */
 public class HandlerRegistry {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(HandlerRegistry.class);
 
     private final Map<Class<? extends Packet>, HandlerWrapper<?>> handlers = new ConcurrentHashMap<>();
 
@@ -37,17 +41,18 @@ public class HandlerRegistry {
     }
 
     /**
-     * Dispatches a packet to its handler if one exists.
+     * Dispatches a packet to its handler.
      *
      * @param packet the packet to dispatch
      * @param ackCallback optional callback for acknowledgment
-     * @return the result of handling, or CANT_HANDLE if no handler exists
+     * @return a future resolving to {@code true} if a handler was found, {@code false} otherwise;
+     *         completes exceptionally if the handler threw or its future failed
      */
-    public HandlerResult dispatch(Packet packet, Consumer<AckResponse> ackCallback) {
+    public CompletableFuture<Boolean> dispatch(Packet packet, Consumer<AckResponse> ackCallback) {
         HandlerWrapper<?> wrapper = handlers.get(packet.getClass());
 
         if (wrapper == null) {
-            return HandlerResult.CANT_HANDLE;
+            return CompletableFuture.completedFuture(false);
         }
 
         return wrapper.handle(packet, ackCallback);
@@ -75,18 +80,29 @@ public class HandlerRegistry {
     /**
      * Type-safe wrapper for packet handlers.
      * Handles the casting internally to avoid unsafe casts in user code.
+     * A null future returned by the handler is treated as synchronous completion.
      */
     private record HandlerWrapper<T extends Packet>(PacketHandler<T> handler, Class<T> packetClass) {
 
-        public HandlerResult handle(Packet packet, Consumer<AckResponse> ackCallback) {
-            if(packetClass.isInstance(packet)) {
+        public CompletableFuture<Boolean> handle(Packet packet, Consumer<AckResponse> ackCallback) {
+            if (packetClass.isInstance(packet)) {
                 try {
-                    return handler.handle(packetClass.cast(packet), ackCallback);
+                    CompletableFuture<Void> future = handler.handle(packetClass.cast(packet), ackCallback);
+                    if (future == null) {
+                        return CompletableFuture.completedFuture(true);
+                    }
+                    return future
+                            .thenApply(v -> true)
+                            .exceptionally(e -> {
+                                LOGGER.warn("Handler threw exception for packet {}", packetClass.getSimpleName(), e);
+                                throw (e instanceof RuntimeException re) ? re : new RuntimeException(e);
+                            });
                 } catch (Exception e) {
-                    return HandlerResult.ERROR;
+                    LOGGER.warn("Handler threw exception for packet {}", packetClass.getSimpleName(), e);
+                    return CompletableFuture.failedFuture(e);
                 }
             }
-            return HandlerResult.ERROR;
+            return CompletableFuture.completedFuture(false);
         }
     }
 }

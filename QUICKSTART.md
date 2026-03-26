@@ -4,14 +4,26 @@ Get up and running with Conduit in 5 minutes!
 
 ## Step 1: Add Dependencies
 
-Add to your `build.gradle`:
+**Recommended — with BOM** (manages all versions centrally):
+
+```kotlin
+// build.gradle.kts
+dependencies {
+    implementation(platform("fr.traqueur.conduit:conduit-bom:1.1.0"))
+    implementation("fr.traqueur.conduit:conduit-redis")      // Redis transport
+    // OR
+    // implementation("fr.traqueur.conduit:conduit-rabbitmq") // RabbitMQ transport
+}
+```
+
+**Without BOM:**
 
 ```gradle
 dependencies {
     // Choose your transport (conduit-core is included transitively)
-    implementation 'fr.traqueur.conduit:conduit-redis:1.0.0'
+    implementation 'fr.traqueur.conduit:conduit-redis:1.1.0'
     // OR
-    // implementation 'fr.traqueur.conduit:conduit-rabbitmq:1.0.0'
+    // implementation 'fr.traqueur.conduit:conduit-rabbitmq:1.1.0'
 }
 ```
 
@@ -51,11 +63,9 @@ conduit.registerPacket(MessagePacket.class);
 ## Step 5: Receive Messages
 
 ```java
-import fr.traqueur.conduit.handler.HandlerResult;
-
 conduit.registerHandler(MessagePacket.class, (packet, ackCallback) -> {
     System.out.println(packet.from() + " says: " + packet.text());
-    return HandlerResult.SUCCESS;
+    return null;
 });
 
 // Start listening
@@ -75,7 +85,6 @@ msg.send();
 package com.example;
 
 import fr.traqueur.conduit.core.Conduit;
-import fr.traqueur.conduit.handler.HandlerResult;
 import fr.traqueur.conduit.packet.Packet;
 import fr.traqueur.conduit.redis.RedisConfig;
 import fr.traqueur.conduit.redis.RedisTransport;
@@ -96,7 +105,7 @@ public class QuickStartDemo {
         // Receive
         conduit.registerHandler(MessagePacket.class, (packet, ackCallback) -> {
             System.out.println(packet.from() + " says: " + packet.text());
-            return HandlerResult.SUCCESS;
+            return null;
         });
 
         conduit.start();
@@ -207,13 +216,17 @@ telnet localhost 6379
 
 ### Import errors?
 
-Verify dependencies in `build.gradle`:
+Verify dependencies in your build file:
+
+```kotlin
+// With BOM (recommended)
+implementation(platform("fr.traqueur.conduit:conduit-bom:1.1.0"))
+implementation("fr.traqueur.conduit:conduit-redis")
+```
 
 ```gradle
-dependencies {
-    // Choose your transport (conduit-core is included transitively)
-    implementation 'fr.traqueur.conduit:conduit-redis:1.0.0'
-}
+// Without BOM
+implementation 'fr.traqueur.conduit:conduit-redis:1.1.0'
 ```
 
 ## Support

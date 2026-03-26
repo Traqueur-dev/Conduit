@@ -2,7 +2,6 @@ package examples.advanced;
 
 import fr.traqueur.conduit.core.Conduit;
 import fr.traqueur.conduit.core.PacketMeta;
-import fr.traqueur.conduit.handler.HandlerResult;
 import fr.traqueur.conduit.packet.Packet;
 import fr.traqueur.conduit.redis.RedisConfig;
 import fr.traqueur.conduit.redis.RedisTransport;
@@ -49,12 +48,12 @@ public class PubSubPatternExample {
         registerAllPackets(orderProcessor);
         orderProcessor.registerHandler(OrderCreatedEvent.class, (packet, ackCallback) -> {
             System.out.println("[Order Processor] New order: " + packet.orderId() + " ($" + packet.amount() + ")");
-            return HandlerResult.SUCCESS;
+            return null;
         });
         orderProcessor.registerHandler(OrderShippedEvent.class, (packet, ackCallback) -> {
             System.out.println("[Order Processor] Order shipped: " + packet.orderId() +
                     " (Tracking: " + packet.trackingNumber() + ")");
-            return HandlerResult.SUCCESS;
+            return null;
         });
 
         // Inventory manager - subscribes to inventory events
@@ -62,7 +61,7 @@ public class PubSubPatternExample {
         inventoryManager.registerHandler(InventoryUpdatedEvent.class, (packet, ackCallback) -> {
             System.out.println("[Inventory Manager] Stock updated: Product " + packet.productId() +
                     " = " + packet.quantity() + " units");
-            return HandlerResult.SUCCESS;
+            return null;
         });
 
         // Notification service - subscribes to notification events
@@ -70,26 +69,26 @@ public class PubSubPatternExample {
         notificationService.registerHandler(NotificationEvent.class, (packet, ackCallback) -> {
             System.out.println("[Notification Service] Sending to user " + packet.userId() +
                     ": " + packet.message());
-            return HandlerResult.SUCCESS;
+            return null;
         });
 
         // Analytics service - subscribes to ALL events
         registerAllPackets(analyticsService);
         analyticsService.registerHandler(OrderCreatedEvent.class, (packet, ackCallback) -> {
             System.out.println("[Analytics] Logged order event");
-            return HandlerResult.SUCCESS;
+            return null;
         });
         analyticsService.registerHandler(OrderShippedEvent.class, (packet, ackCallback) -> {
             System.out.println("[Analytics] Logged shipping event");
-            return HandlerResult.SUCCESS;
+            return null;
         });
         analyticsService.registerHandler(InventoryUpdatedEvent.class, (packet, ackCallback) -> {
             System.out.println("[Analytics] Logged inventory event");
-            return HandlerResult.SUCCESS;
+            return null;
         });
         analyticsService.registerHandler(NotificationEvent.class, (packet, ackCallback) -> {
             System.out.println("[Analytics] Logged notification event");
-            return HandlerResult.SUCCESS;
+            return null;
         });
 
         // Start all services
