@@ -20,6 +20,8 @@ allprojects {
 }
 
 subprojects {
+    if (name == "conduit-bom") return@subprojects
+
     apply(plugin = "java-library")
     apply(plugin = "maven-publish")
 
