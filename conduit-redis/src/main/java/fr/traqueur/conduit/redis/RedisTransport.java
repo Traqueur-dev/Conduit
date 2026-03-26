@@ -121,13 +121,13 @@ public class RedisTransport implements Transport {
                     return null;
                 });
 
-        // Timeout handling
-        future.orTimeout(timeoutMs, TimeUnit.MILLISECONDS)
-                .whenComplete((result, error) -> {
-                    pendingAcks.remove(ackId);
-                    pubSubAsyncCommands.unsubscribe(ackChannel);
-                    pubSubConnection.removeListener(ackListener);
-                });
+        // Timeout handling — attach cleanup to original future, not the orTimeout derivative
+        future.orTimeout(timeoutMs, TimeUnit.MILLISECONDS);
+        future.whenComplete((result, error) -> {
+            pendingAcks.remove(ackId);
+            pubSubAsyncCommands.unsubscribe(ackChannel);
+            pubSubConnection.removeListener(ackListener);
+        });
 
         return future;
     }
@@ -165,13 +165,13 @@ public class RedisTransport implements Transport {
                     return null;
                 });
 
-        // Timeout handling
-        future.orTimeout(timeoutMs, TimeUnit.MILLISECONDS)
-                .whenComplete((result, error) -> {
-                    pendingAcks.remove(ackId);
-                    pubSubAsyncCommands.unsubscribe(ackChannel);
-                    pubSubConnection.removeListener(ackListener);
-                });
+        // Timeout handling — attach cleanup to original future, not the orTimeout derivative
+        future.orTimeout(timeoutMs, TimeUnit.MILLISECONDS);
+        future.whenComplete((result, error) -> {
+            pendingAcks.remove(ackId);
+            pubSubAsyncCommands.unsubscribe(ackChannel);
+            pubSubConnection.removeListener(ackListener);
+        });
 
         return future;
     }
