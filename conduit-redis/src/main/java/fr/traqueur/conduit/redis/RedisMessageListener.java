@@ -28,14 +28,14 @@ class RedisMessageListener extends RedisPubSubAdapter<String, byte[]> {
 
     /**
      * Handles incoming PubSub messages.
-     * Accepts messages from the exact channel or sub-channels (for unicast routing).
+     * Accepts messages from the exact channel only.
      *
      * @param channel the channel the message was received on
      * @param message the message data
      */
     @Override
     public void message(String channel, byte[] message) {
-        if (channel.equals(expectedChannel) || channel.startsWith(expectedChannel + ":")) {
+        if (channel.equals(expectedChannel)) {
             handler.accept(channel, message);
         }
     }
