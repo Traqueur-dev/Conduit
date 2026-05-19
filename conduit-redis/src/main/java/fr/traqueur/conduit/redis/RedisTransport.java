@@ -55,7 +55,14 @@ public class RedisTransport implements Transport {
 
     @Override
     public void connect() throws Exception {
-        RedisURI redisUri = RedisURI.create(config.toUri());
+        RedisURI.Builder uriBuilder = RedisURI.builder()
+                .withHost(config.host())
+                .withPort(config.port())
+                .withDatabase(config.database());
+        if (config.password() != null && !config.password().isEmpty()) {
+            uriBuilder.withPassword(config.password().toCharArray());
+        }
+        RedisURI redisUri = uriBuilder.build();
         RedisCodec<String, byte[]> codec = RedisCodec.of(StringCodec.UTF8, ByteArrayCodec.INSTANCE);
 
         client = RedisClient.create(redisUri);
