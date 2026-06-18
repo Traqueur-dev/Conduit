@@ -262,7 +262,7 @@ public class RabbitMQTransport implements Transport {
 
             // Create queue with instanceId as routing key
             String queueName = "conduit.unicast." + channelName + "." + instanceId;
-            consumeChannel.queueDeclare(queueName, false, false, true, null);
+            consumeChannel.queueDeclare(queueName, true, false, true, null);
             consumeChannel.queueBind(queueName, exchangeName, instanceId);
 
             queueNames.put(channelName + ":" + instanceId, queueName);
