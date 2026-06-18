@@ -12,6 +12,8 @@ import io.lettuce.core.codec.RedisCodec;
 import io.lettuce.core.codec.StringCodec;
 import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
 import io.lettuce.core.pubsub.api.async.RedisPubSubAsyncCommands;
+import io.lettuce.core.resource.DefaultClientResources;
+import io.netty.resolver.DefaultAddressResolverGroup;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -35,6 +37,7 @@ public class RedisTransport implements Transport {
     private static final Logger LOGGER = LoggerFactory.getLogger(RedisTransport.class);
 
     private final RedisConfig config;
+    private DefaultClientResources clientResources;
     private RedisClient client;
     private StatefulRedisConnection<String, byte[]> connection;
     private StatefulRedisPubSubConnection<String, byte[]> pubSubConnection;
@@ -65,7 +68,13 @@ public class RedisTransport implements Transport {
         RedisURI redisUri = uriBuilder.build();
         RedisCodec<String, byte[]> codec = RedisCodec.of(StringCodec.UTF8, ByteArrayCodec.INSTANCE);
 
-        client = RedisClient.create(redisUri);
+        // Use JVM DNS resolver instead of Netty's async DnsAddressResolverGroup.
+        // Prevents classloader conflicts when multiple plugins each bundle Lettuce
+        // and are loaded via isolated PluginClassLoaders (e.g. PaperSpigot).
+        clientResources = DefaultClientResources.builder()
+                .addressResolverGroup(DefaultAddressResolverGroup.INSTANCE)
+                .build();
+        client = RedisClient.create(clientResources, redisUri);
         connection = client.connect(codec);
         pubSubConnection = client.connectPubSub(codec);
 
@@ -258,6 +267,9 @@ public class RedisTransport implements Transport {
         }
         if (client != null) {
             client.shutdown();
+        }
+        if (clientResources != null) {
+            clientResources.shutdown();
         }
         LOGGER.info("Redis transport closed");
     }

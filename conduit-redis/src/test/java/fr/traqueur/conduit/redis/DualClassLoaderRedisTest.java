@@ -89,10 +89,11 @@ class DualClassLoaderRedisTest {
 
         URL[] urls = classpathUrls();
 
-        // Each URLClassLoader has platform CL as parent — no shared Lettuce/Netty classes.
-        // This mirrors PaperSpigot's PluginClassLoader isolation.
-        URLClassLoader cl1 = new URLClassLoader(urls, ClassLoader.getPlatformClassLoader());
-        URLClassLoader cl2 = new URLClassLoader(urls, ClassLoader.getPlatformClassLoader());
+        // Each URLClassLoader has the system CL as parent, mirroring PaperSpigot's
+        // PluginClassLoader which shares server classes (including Paper's bundled Netty)
+        // but loads each plugin's bundled Lettuce separately.
+        URLClassLoader cl1 = new URLClassLoader(urls, ClassLoader.getSystemClassLoader());
+        URLClassLoader cl2 = new URLClassLoader(urls, ClassLoader.getSystemClassLoader());
 
         Object transport1 = null;
         Object transport2 = null;
