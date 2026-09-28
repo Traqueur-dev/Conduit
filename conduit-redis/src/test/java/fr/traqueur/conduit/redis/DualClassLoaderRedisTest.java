@@ -58,7 +58,19 @@ class DualClassLoaderRedisTest {
      */
     private Object createAndConnect(URLClassLoader cl, String host, int port) throws Exception {
         Class<?> configClass = cl.loadClass("fr.traqueur.conduit.redis.RedisConfig");
-        Constructor<?> configCtor = configClass.getDeclaredConstructors()[0];
+        // The four-argument shape, asked for BY ITS SIGNATURE and not as `getDeclaredConstructors()[0]`.
+        //
+        // That index used to work because there was one constructor. Adding `ssl` then `verifyPeer`
+        // made the canonical one six arguments wide, and this line started failing with « wrong
+        // number of arguments: 4 expected: 6 » — a real break that no compiler could see, since the
+        // whole point here is to load the class in a foreign classloader.
+        //
+        // Naming the signature is also what this test is FOR: it stands in for a plugin compiled
+        // against an older Conduit, and such a plugin links against exactly this descriptor. If it
+        // ever disappears, this test must fail — and now it fails for that reason instead of failing
+        // because someone appended a field.
+        Constructor<?> configCtor = configClass.getDeclaredConstructor(
+                String.class, int.class, String.class, int.class);
         Object config = configCtor.newInstance(host, port, null, 0);
 
         Class<?> transportClass = cl.loadClass("fr.traqueur.conduit.redis.RedisTransport");

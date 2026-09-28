@@ -76,6 +76,13 @@ public class RedisTransport implements Transport {
             builder.withPassword(config.password().toCharArray());
         }
         builder.withSsl(config.ssl());
+        // Only ever RELAXED, never tightened: Lettuce verifies by default, so this line can only
+        // take a guarantee away. It is written as its own statement, guarded, so that reading it is
+        // reading a decision — `withVerifyPeer(config.verifyPeer())` unguarded would look like
+        // plumbing and would be just as easy to set wrong.
+        if (config.ssl() && !config.verifyPeer()) {
+            builder.withVerifyPeer(false);
+        }
         return builder.build();
     }
 
@@ -97,8 +104,8 @@ public class RedisTransport implements Transport {
         asyncCommands = connection.async();
         pubSubAsyncCommands = pubSubConnection.async();
 
-        LOGGER.info("Connected to Redis at {}:{} (TLS: {})", config.host(), config.port(),
-                config.ssl());
+        LOGGER.info("Connected to Redis at {}:{} (TLS: {}{})", config.host(), config.port(),
+                config.ssl(), config.ssl() && !config.verifyPeer() ? ", peer NOT verified" : "");
     }
 
     @Override

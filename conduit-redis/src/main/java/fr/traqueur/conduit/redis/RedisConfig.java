@@ -8,6 +8,9 @@ package fr.traqueur.conduit.redis;
  * @param password Redis password (null if no auth)
  * @param database Redis database number (0-15)
  * @param ssl whether to speak TLS to that port ({@code rediss://})
+ * @param verifyPeer whether to verify the server's certificate and hostname. {@code true} is the
+ *                   only safe default; {@code false} keeps the wire ENCRYPTED and stops
+ *                   AUTHENTICATING the server, which is a deliberate trade, not a fallback
  *
  * @author Traqueur
  */
@@ -16,7 +19,8 @@ public record RedisConfig(
     int port,
     String password,
     int database,
-    boolean ssl
+    boolean ssl,
+    boolean verifyPeer
 ) {
 
     /**
@@ -27,7 +31,18 @@ public record RedisConfig(
      * linking. Every existing caller reaches TLS by adding one argument, not by being rewritten.
      */
     public RedisConfig(String host, int port, String password, int database) {
-        this(host, port, password, database, false);
+        this(host, port, password, database, false, true);
+    }
+
+    /**
+     * With TLS, verifying the peer — the five-argument shape of 1.2.0.
+     *
+     * <p>Kept for the same reason as the four-argument one, and it defaults {@code verifyPeer} to
+     * {@code true}: a caller that said « use TLS » and nothing else asked for the strong form. A
+     * five-argument call silently becoming unauthenticated would be the worst kind of compatibility.
+     */
+    public RedisConfig(String host, int port, String password, int database, boolean ssl) {
+        this(host, port, password, database, ssl, true);
     }
     
     /**
@@ -36,7 +51,7 @@ public record RedisConfig(
      * @return a default local Redis configuration
      */
     public static RedisConfig localhost() {
-        return new RedisConfig("localhost", 6379, null, 0, false);
+        return new RedisConfig("localhost", 6379, null, 0, false, true);
     }
 
     /**
@@ -47,7 +62,7 @@ public record RedisConfig(
      * @return a Redis configuration
      */
     public static RedisConfig of(String host, int port) {
-        return new RedisConfig(host, port, null, 0, false);
+        return new RedisConfig(host, port, null, 0, false, true);
     }
 
     /**
@@ -59,7 +74,7 @@ public record RedisConfig(
      * @return a Redis configuration with authentication
      */
     public static RedisConfig of(String host, int port, String password) {
-        return new RedisConfig(host, port, password, 0, false);
+        return new RedisConfig(host, port, password, 0, false, true);
     }
 
     /**
@@ -72,7 +87,26 @@ public record RedisConfig(
      * @return a Redis configuration
      */
     public static RedisConfig of(String host, int port, String password, boolean ssl) {
-        return new RedisConfig(host, port, password, 0, ssl);
+        return new RedisConfig(host, port, password, 0, ssl, true);
+    }
+
+    /**
+     * Creates a Redis config with authentication, over TLS, choosing whether to verify the peer.
+     *
+     * <p>{@code verifyPeer = false} is for a link whose endpoints are already known to each other
+     * by other means — a private bridge between containers one owns, for instance. It encrypts and
+     * it does not authenticate; whoever passes it should be able to say why.
+     *
+     * @param host the Redis server host
+     * @param port the Redis server port
+     * @param password the Redis password
+     * @param ssl whether to speak TLS
+     * @param verifyPeer whether to verify the certificate and hostname
+     * @return a Redis configuration
+     */
+    public static RedisConfig of(String host, int port, String password, boolean ssl,
+                                 boolean verifyPeer) {
+        return new RedisConfig(host, port, password, 0, ssl, verifyPeer);
     }
 
     /**
