@@ -46,6 +46,37 @@ class RedisConfigSslTest {
     }
 
     @Test
+    @DisplayName("verifyPeer is TRUE by default, and only an explicit call relaxes it")
+    void verifyPeerDefaultsToTrue() {
+        // The point of the default: every shape that existed before this field asked for the STRONG
+        // form. A five-argument call silently becoming unauthenticated would be the worst kind of
+        // compatibility — the code would read « TLS » and mean « encrypted, unauthenticated ».
+        assertThat(new RedisConfig("h", 6380, "p", 0).verifyPeer()).isTrue();
+        assertThat(new RedisConfig("h", 6380, "p", 0, true).verifyPeer()).isTrue();
+        assertThat(RedisConfig.localhost().verifyPeer()).isTrue();
+        assertThat(RedisConfig.of("h", 6379).verifyPeer()).isTrue();
+        assertThat(RedisConfig.of("h", 6379, "p").verifyPeer()).isTrue();
+        assertThat(RedisConfig.of("h", 6379, "p", true).verifyPeer()).isTrue();
+        // Relaxed only when asked for, in so many words.
+        assertThat(RedisConfig.of("h", 6379, "p", true, false).verifyPeer()).isFalse();
+    }
+
+    @Test
+    @DisplayName("the URI stops verifying only when ssl AND !verifyPeer")
+    void theUriRelaxesOnlyWhenAsked() {
+        // `isVerifyPeer` is what Lettuce reads, so it is what this asserts — not the config's own
+        // field, which would only prove that a record keeps what it was given.
+        assertThat(RedisTransport.uriOf(new RedisConfig("h", 6380, "p", 0, true, true))
+                .isVerifyPeer()).isTrue();
+        assertThat(RedisTransport.uriOf(new RedisConfig("h", 6380, "p", 0, true, false))
+                .isVerifyPeer()).isFalse();
+        // And `verifyPeer: false` WITHOUT TLS changes nothing: there is no peer to verify on a
+        // cleartext connection, and letting it through would leave a false trace in the URI.
+        assertThat(RedisTransport.uriOf(new RedisConfig("h", 6379, "p", 0, false, false))
+                .isVerifyPeer()).isTrue();
+    }
+
+    @Test
     @DisplayName("toUri follows the flag: rediss:// when ssl")
     void toUriFollowsTheFlag() {
         // This helper has no caller in the repository, which is exactly why it was worth fixing: a
