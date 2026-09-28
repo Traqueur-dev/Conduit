@@ -21,6 +21,16 @@ jobs:
     uses: GroupeZ-dev/actions/.github/workflows/build.yml@main
     with:
       project-name: "Conduit"
+      # 21 et non le 25 par defaut du workflow partage, et ce n'est pas une preference : Gradle 8.14
+      # (celui du wrapper) refuse de TOURNER sur un JDK 25. Son message est la chaine « 25.0.3 »,
+      # sans un mot d'explication -- donc un echec qui ne dit pas sa cause et qu'on cherche dans le
+      # code.
+      #
+      # 21 est aussi la version que ce projet CIBLE (`sourceCompatibility = VERSION_21`), donc la CI
+      # compile desormais avec le JDK dont le build annonce le bytecode. L'autre issue serait de
+      # monter le wrapper en Gradle 9.x pour accepter le defaut ; c'est un changement de build, pas
+      # un reglage de CI.
+      java-version: "21"
       publish: true
       publish-on-discord: false
       project-to-publish: "publishAll"

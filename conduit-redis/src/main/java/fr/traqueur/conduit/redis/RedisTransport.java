@@ -56,16 +56,32 @@ public class RedisTransport implements Transport {
         this.config = config;
     }
 
-    @Override
-    public void connect() throws Exception {
-        RedisURI.Builder uriBuilder = RedisURI.builder()
+    /**
+     * The URI a config describes, built without opening anything.
+     *
+     * <p>Package-private and separate from {@link #connect()} so a test can assert what this
+     * transport will actually dial. Inlined, the only way to check that {@code ssl} travels was to
+     * rebuild the URI in the test — which passes even when this method forgets it.
+     *
+     * <p>TLS is a property of the PORT, and that is why it has to be here: a Redis published with
+     * {@code tls-port} refuses a cleartext handshake, and a cleartext port refuses a TLS one. Every
+     * other client sharing that host and port has to agree, or half of them go quiet together.
+     */
+    static RedisURI uriOf(RedisConfig config) {
+        RedisURI.Builder builder = RedisURI.builder()
                 .withHost(config.host())
                 .withPort(config.port())
                 .withDatabase(config.database());
         if (config.password() != null && !config.password().isEmpty()) {
-            uriBuilder.withPassword(config.password().toCharArray());
+            builder.withPassword(config.password().toCharArray());
         }
-        RedisURI redisUri = uriBuilder.build();
+        builder.withSsl(config.ssl());
+        return builder.build();
+    }
+
+    @Override
+    public void connect() throws Exception {
+        RedisURI redisUri = uriOf(config);
         RedisCodec<String, byte[]> codec = RedisCodec.of(StringCodec.UTF8, ByteArrayCodec.INSTANCE);
 
         // Use JVM DNS resolver instead of Netty's async DnsAddressResolverGroup.
@@ -81,7 +97,8 @@ public class RedisTransport implements Transport {
         asyncCommands = connection.async();
         pubSubAsyncCommands = pubSubConnection.async();
 
-        LOGGER.info("Connected to Redis at {}:{}", config.host(), config.port());
+        LOGGER.info("Connected to Redis at {}:{} (TLS: {})", config.host(), config.port(),
+                config.ssl());
     }
 
     @Override
