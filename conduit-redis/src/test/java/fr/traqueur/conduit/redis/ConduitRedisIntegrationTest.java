@@ -18,7 +18,10 @@ class ConduitRedisIntegrationTest extends BaseConduitIntegrationTest {
             .withExposedPorts(6379);
 
     @Override
-    protected Transport newTransport() {
-        return new RedisTransport(RedisConfig.of(redis.getHost(), redis.getFirstMappedPort()));
+    protected Transport newTransport(String channelPrefix) {
+        return RedisTransport.builder()
+                .config(RedisConfig.of(redis.getHost(), redis.getFirstMappedPort()))
+                .channelPrefix(channelPrefix)
+                .build();
     }
 }

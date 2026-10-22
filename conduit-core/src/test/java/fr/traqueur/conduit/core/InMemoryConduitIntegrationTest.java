@@ -24,8 +24,8 @@ class InMemoryConduitIntegrationTest extends BaseConduitIntegrationTest {
     private final InMemoryBus bus = new InMemoryBus();
 
     @Override
-    protected Transport newTransport() {
-        return bus.transport();
+    protected Transport newTransport(String channelPrefix) {
+        return bus.transport(channelPrefix);
     }
 
     @Override
@@ -98,22 +98,5 @@ class InMemoryConduitIntegrationTest extends BaseConduitIntegrationTest {
         assertThat(conduit1.metrics().ackTimeouts()).isEqualTo(1);
 
         assertThat(conduit1.sendWithAck(new ConfigReloadPacket("x"), 1000).join().success()).isTrue();
-    }
-
-    @Test
-    @DisplayName("Two prefixes on one bus do not see each other")
-    void prefixesIsolate() throws Exception {
-        Conduit prod = started(Conduit.builder().transport(bus.transport("prod:")).instanceId("p").defaultChannel("conduit-test"));
-        Conduit staging = started(Conduit.builder().transport(bus.transport("staging:")).instanceId("s").defaultChannel("conduit-test"));
-        Conduit prod2 = started(Conduit.builder().transport(bus.transport("prod:")).instanceId("p2").defaultChannel("conduit-test"));
-        AtomicInteger stagingGot = new AtomicInteger();
-        AtomicInteger prodGot = new AtomicInteger();
-        staging.registerHandler(ChatMessagePacket.class, (packet, ack) -> { stagingGot.incrementAndGet(); return null; });
-        prod2.registerHandler(ChatMessagePacket.class, (packet, ack) -> { prodGot.incrementAndGet(); return null; });
-
-        prod.send(new ChatMessagePacket(UUID.randomUUID(), "x"));
-
-        assertThat(prodGot.get()).isEqualTo(1);
-        assertThat(stagingGot.get()).isZero();
     }
 }

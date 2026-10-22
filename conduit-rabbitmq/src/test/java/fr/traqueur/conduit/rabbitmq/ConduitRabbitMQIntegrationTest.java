@@ -17,8 +17,11 @@ class ConduitRabbitMQIntegrationTest extends BaseConduitIntegrationTest {
     static RabbitMQContainer rabbitmq = new RabbitMQContainer(DockerImageName.parse("rabbitmq:3.12-alpine"));
 
     @Override
-    protected Transport newTransport() {
-        return new RabbitMQTransport(new RabbitMQConfig(
-                rabbitmq.getHost(), rabbitmq.getAmqpPort(), rabbitmq.getAdminUsername(), rabbitmq.getAdminPassword(), "/"));
+    protected Transport newTransport(String channelPrefix) {
+        return RabbitMQTransport.builder()
+                .config(new RabbitMQConfig(rabbitmq.getHost(), rabbitmq.getAmqpPort(),
+                        rabbitmq.getAdminUsername(), rabbitmq.getAdminPassword(), "/"))
+                .channelPrefix(channelPrefix)
+                .build();
     }
 }

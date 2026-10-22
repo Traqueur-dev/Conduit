@@ -283,7 +283,21 @@ RabbitMQConfig config = RabbitMQConfig.of("rabbitmq.example.com", 5672, "user", 
 RabbitMQConfig config = new RabbitMQConfig("host", 5672, "user", "pass", "/");
 
 RabbitMQTransport transport = new RabbitMQTransport(config);
+
+// Or from a ConnectionFactory (TLS, timeouts, credentials provider...)
+RabbitMQTransport transport = new RabbitMQTransport(connectionFactory);
+
+// Or on the application's own connection, which the transport never closes,
+// with every exchange and queue prefixed so environments sharing one broker do not see each other
+RabbitMQTransport transport = RabbitMQTransport.builder()
+    .connection(applicationConnection)
+    .channelPrefix("prod:")
+    .build();
 ```
+
+Publishing uses publisher confirms. A refused publication (nack, `ACCESS_REFUSED`, closed channel)
+fails the future returned by `send`. A RabbitMQ user confined to one prefix
+(`set_permissions ... "^prod:.*" "^prod:.*" "^prod:.*"`) cannot touch another environment.
 
 ## Advanced Usage
 

@@ -65,10 +65,10 @@ Refusals are counted (`refused`), never answered, and logged at most once per se
 
 ### Transport Implementations
 
-Every transport applies an optional `channelPrefix()` to physical names. That prefix is signed as the envelope's namespace.
+Every transport applies an optional `channelPrefix()` at the start of every physical name (channels, exchanges, queues). That prefix is signed as the envelope's namespace. Features must stay symmetric across transports: what one offers (prefix, provided client/connection, failing futures), the others offer too, and the shared suite proves it.
 
 - **Redis**: Broadcast `<prefix><channel>`, unicast `<prefix><channel>:<instanceId>`, with one `Dispatcher` listener routing by channel. Built from `RedisConfig`, a `RedisURI` or a provided `RedisClient`. A provided client and its resources are never closed.
-- **RabbitMQ**: Fanout `conduit.broadcast.<channel>` (exclusive queue per subscriber), direct `conduit.direct.<channel>` (routing key = instanceId). Separate publish/consume channels, each with its own lock; `declaredExchanges` cache. Blocking: futures are already complete.
+- **RabbitMQ**: Fanout `<prefix>conduit.broadcast.<channel>` (exclusive queue `<prefix>conduit.sub.<channel>.<uuid>` per subscriber), direct `<prefix>conduit.direct.<channel>` (routing key = instanceId, queue `<prefix>conduit.unicast.<channel>.<instanceId>`). Built from `RabbitMQConfig`, a `ConnectionFactory` or a provided `Connection`; a provided connection is never closed. A single publish channel in confirm mode: futures complete on the broker's ack and fail on a nack or a channel shutdown, and the channel is reopened if the broker closed it. One channel per subscription; exchange declarations on a short-lived channel (cached in `declaredExchanges`), so a permission refusal only closes the channel it happened on.
 - **In-memory**: `InMemoryBus` with Redis semantics. Synchronous by default, `InMemoryBus.async()` for ordered background delivery. `disconnect`/`reconnect`/`dropNext`/`dropAcks` simulate failures.
 
 ACKs never go through transport-specific code: a responder does `transport.sendTo(replyChannel, requesterId, ackEnvelope)`.
@@ -83,9 +83,9 @@ ACKs never go through transport-specific code: a responder does `transport.sendT
 
 ## Testing Strategy
 
-- `BaseConduitIntegrationTest` (in conduit-core tests, exported through the `testArtifacts` configuration) is the shared suite. Subclasses implement `newTransport()` and optionally `settle()`.
+- `BaseConduitIntegrationTest` (in conduit-core tests, exported through the `testArtifacts` configuration) is the shared suite. Subclasses implement `newTransport(String channelPrefix)` and optionally `settle()`.
 - It runs on `InMemoryConduitIntegrationTest` (sync), `AsyncInMemoryConduitIntegrationTest`, `ConduitRedisIntegrationTest` and `ConduitRabbitMQIntegrationTest`.
-- Redis-only: `RedisTransportTest` (provided client, ACL `NOPERM`, prefix), `RedisConfigTest`, `DualClassLoaderRedisTest`.
+- Transport-specific, mirrored: `RedisTransportTest` (provided client, ACL `NOPERM`, prefixed names) and `RabbitMQTransportTest` (provided connection, `ACCESS_REFUSED`, prefix as permission boundary, prefixed names). Also `RedisConfigTest` and `DualClassLoaderRedisTest`.
 - Test dependencies: JUnit Jupiter 6, AssertJ, Awaitility, Testcontainers.
 
 ## Maven Publishing

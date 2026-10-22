@@ -41,9 +41,13 @@ Decoding checks every length against the bytes that remain. It refuses trailing 
 
 | Message       | Redis channel                                  | RabbitMQ                                                  |
 |---------------|------------------------------------------------|-----------------------------------------------------------|
-| broadcast     | `<prefix><channel>`                            | fanout exchange `conduit.broadcast.<channel>`             |
-| unicast       | `<prefix><channel>:<target>`                   | direct exchange `conduit.direct.<channel>`, key `<target>` |
-| ACK response  | `<prefix><defaultChannel>:ack:<requester>`     | direct exchange `conduit.direct.<defaultChannel>:ack`, key `<requester>` |
+| broadcast     | `<prefix><channel>`                            | fanout exchange `<prefix>conduit.broadcast.<channel>`, one queue `<prefix>conduit.sub.<channel>.<random>` per subscriber |
+| unicast       | `<prefix><channel>:<target>`                   | direct exchange `<prefix>conduit.direct.<channel>`, key `<target>`, queue `<prefix>conduit.unicast.<channel>.<target>` |
+| ACK response  | `<prefix><defaultChannel>:ack:<requester>`     | direct exchange `<prefix>conduit.direct.<defaultChannel>:ack`, key `<requester>` |
+
+Every physical name starts with the prefix on both transports. A backend user can therefore be
+confined to one prefix: a Redis ACL channel pattern `&valkn-prod:*`, or a RabbitMQ permission
+regex `^valkn-prod:.*`.
 
 Each instance subscribes its reply channel once, at `start()`. An ACK request costs one publish,
 with no per-request subscription.

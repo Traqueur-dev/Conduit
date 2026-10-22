@@ -15,8 +15,8 @@ class AsyncInMemoryConduitIntegrationTest extends BaseConduitIntegrationTest {
     private final InMemoryBus bus = InMemoryBus.async();
 
     @Override
-    protected Transport newTransport() {
-        return bus.transport();
+    protected Transport newTransport(String channelPrefix) {
+        return bus.transport(channelPrefix);
     }
 
     @Override

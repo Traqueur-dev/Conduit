@@ -86,9 +86,17 @@ public abstract class BaseConduitIntegrationTest {
     public record SequencePacket(int n) implements Packet {}
 
     /**
+     * @param channelPrefix the channel prefix, {@code ""} for none
      * @return a new, unconnected transport on the backend shared by the whole test
      */
-    protected abstract Transport newTransport() throws Exception;
+    protected abstract Transport newTransport(String channelPrefix) throws Exception;
+
+    /**
+     * @return a new, unconnected transport without prefix
+     */
+    protected Transport newTransport() throws Exception {
+        return newTransport("");
+    }
 
     /**
      * @return how long to wait before asserting that something did NOT arrive
@@ -98,8 +106,12 @@ public abstract class BaseConduitIntegrationTest {
     }
 
     protected Conduit.ConduitBuilder builder(String instanceId) throws Exception {
+        return builder(instanceId, "");
+    }
+
+    protected Conduit.ConduitBuilder builder(String instanceId, String channelPrefix) throws Exception {
         return Conduit.builder()
-                .transport(newTransport())
+                .transport(newTransport(channelPrefix))
                 .instanceId(instanceId)
                 .defaultChannel("conduit-test");
     }
@@ -155,7 +167,11 @@ public abstract class BaseConduitIntegrationTest {
 
     /** A bare transport on the same backend, to capture and re-publish raw bytes like an attacker would. */
     private Transport rawTransport() throws Exception {
-        Transport raw = newTransport();
+        return rawTransport("");
+    }
+
+    private Transport rawTransport(String channelPrefix) throws Exception {
+        Transport raw = newTransport(channelPrefix);
         raw.connect();
         rawTransports.add(raw);
         return raw;
@@ -711,6 +727,58 @@ public abstract class BaseConduitIntegrationTest {
 
         assertThat(ack.message()).isEqualTo("genuine");
         await().atMost(10, TimeUnit.SECONDS).until(() -> a.metrics().refused() == 1);
+    }
+
+    @Test
+    @DisplayName("A signed packet replayed under another prefix is refused")
+    void replayUnderAnotherPrefixIsRefused() throws Exception {
+        Conduit a = started(builder("prod-a", "prod:").signer(HmacSigner.sha256("server-a", SECRET_A)).verifier(KEYS));
+        Conduit victim = started(builder("staging-b", "staging:").signer(HmacSigner.sha256("server-b", SECRET_B)).verifier(KEYS));
+        for (Conduit c : List.of(a, victim)) {
+            c.registerPacket(SecurePacket.class).get(10, TimeUnit.SECONDS);
+        }
+        AtomicInteger calls = new AtomicInteger();
+        ackSecure(victim, calls);
+
+        Transport spy = rawTransport("prod:");
+        List<byte[]> captured = new CopyOnWriteArrayList<>();
+        spy.subscribe("secure", (ch, data) -> captured.add(data)).get(10, TimeUnit.SECONDS);
+        a.send(new SecurePacket("prod only")).get(10, TimeUnit.SECONDS);
+        await().atMost(10, TimeUnit.SECONDS).until(() -> captured.size() == 1);
+
+        rawTransport("staging:").broadcast("secure", captured.get(0)).get(10, TimeUnit.SECONDS);
+
+        await().atMost(10, TimeUnit.SECONDS).until(() -> victim.metrics().refused() == 1);
+        assertThat(calls.get()).isZero();
+    }
+
+    // ===== 7. Channel prefix =====
+
+    @Test
+    @DisplayName("Two prefixes on one backend do not see each other, ACKs included")
+    void prefixesIsolate() throws Exception {
+        Conduit prod1 = started(builder("p1", "prod:"));
+        Conduit prod2 = started(builder("p2", "prod:"));
+        Conduit staging = started(builder("s1", "staging:"));
+        AtomicInteger stagingGot = new AtomicInteger();
+        AtomicInteger prodGot = new AtomicInteger();
+        AtomicInteger unprefixedGot = new AtomicInteger();
+        staging.registerHandler(ConfigReloadPacket.class, (packet, ack) -> { stagingGot.incrementAndGet(); return null; });
+        conduit2.registerHandler(ConfigReloadPacket.class, (packet, ack) -> { unprefixedGot.incrementAndGet(); return null; });
+        prod2.registerHandler(ConfigReloadPacket.class, (packet, ack) -> {
+            prodGot.incrementAndGet();
+            ack.accept(AckResponse.success("p", "prod answers"));
+            return null;
+        });
+
+        AckResponse ack = prod1.sendWithAck(new ConfigReloadPacket("x"), 10_000).get(15, TimeUnit.SECONDS);
+
+        assertThat(ack.message()).isEqualTo("prod answers");
+        sleepSettle();
+        assertThat(prodGot.get()).isEqualTo(1);
+        assertThat(stagingGot.get()).isZero();
+        assertThat(unprefixedGot.get()).isZero();
+        assertThat(prod1.transport().channelPrefix()).isEqualTo("prod:");
     }
 
     // ===== 8. Metrics =====

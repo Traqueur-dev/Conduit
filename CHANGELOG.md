@@ -43,6 +43,16 @@ instance cannot read each other's envelopes).
   `LongAdder`s, read without locking, and pull in no dependency.
 - **Unregistered instances.** `ConduitBuilder.unregistered()` keeps an instance out of the static
   registry: it is never the default and never found by name.
+- **RabbitMQ.** New constructors `RabbitMQTransport(ConnectionFactory)` and
+  `RabbitMQTransport(Connection)`, and `RabbitMQTransport.builder()` with `config`,
+  `connectionFactory`, `connection` and `channelPrefix`. A provided connection is never closed by
+  the transport; only its own channels and queues are. The prefix starts every exchange and queue
+  name, so one RabbitMQ permission regex (`^prefix:.*`) confines a user to one environment.
+  Publishing uses publisher confirms: the future completes on the broker's confirmation, and fails
+  on a nack, a refused permission (`ACCESS_REFUSED`) or a closed channel.
+  Each subscription has its own channel, and declarations run on a short-lived one, so a refusal
+  never closes the other subscriptions. A closed publish channel is reopened.
+  `RabbitMQConfig.toString()` hides the password.
 - **Redis.** New constructors `RedisTransport(RedisURI)` and `RedisTransport(RedisClient)`, and
   `RedisTransport.builder()` with `config`, `uri`, `client` and `channelPrefix`. A provided client,
   and its `ClientResources`, is never closed by the transport. `channelPrefix` applies to every
@@ -76,7 +86,8 @@ instance cannot read each other's envelopes).
 - `RedisTransport` routes every message through a single listener. Unsubscribing removes the
   route; the per-subscription listeners used to accumulate.
 - `RabbitMQTransport.unsubscribe` works for broadcast channels too, and an exchange declaration
-  that fails is retried instead of being cached.
+  that fails is retried instead of being cached. Broadcast queues are now named
+  (`<prefix>conduit.sub.<channel>.<random>`) instead of server-named.
 - Lettuce 7.2.0 → 7.8.0.
 
 ### Removed
@@ -97,4 +108,5 @@ instance cannot read each other's envelopes).
 | `conduit.send(packet);` (void)                         | unchanged in source; the returned future can now be checked             |
 | custom `Transport`                                     | implement the new interface; drop all ACK logic                        |
 | `Thread.sleep(...)` after `start()`                    | not needed                                                             |
-| `BaseConduitIntegrationTest.setupConduitInstances()`   | `newTransport()` (one fresh transport on the shared backend)            |
+| `BaseConduitIntegrationTest.setupConduitInstances()`   | `newTransport(String channelPrefix)` (one fresh transport on the shared backend) |
+| RabbitMQ exchanges `conduit.broadcast.<ch>`            | unchanged without prefix; `<prefix>conduit.broadcast.<ch>` with one     |
