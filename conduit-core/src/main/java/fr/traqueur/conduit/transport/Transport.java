@@ -1,113 +1,103 @@
 package fr.traqueur.conduit.transport;
 
-import fr.traqueur.conduit.core.AckResponse;
-
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 
 /**
- * Abstraction layer for different transport mechanisms (Redis, RabbitMQ, etc.).
- * Handles both broadcast and unicast message delivery with optional acknowledgment.
+ * A messaging backend (Redis, RabbitMQ, in-memory...). It only moves opaque bytes on named
+ * channels: routing of ACKs, signatures and dispatch all live in
+ * {@link fr.traqueur.conduit.core.Conduit}.
+ *
+ * <p>Every channel name given to a transport is logical; a transport that supports a
+ * {@linkplain #channelPrefix() prefix} applies it to every physical name, in both directions.</p>
+ *
+ * <p>Handlers passed to {@code subscribe*} are called on the transport's own thread; a transport
+ * must catch whatever a handler throws so it never breaks its delivery loop.</p>
  *
  * @author Traqueur
  */
 public interface Transport extends AutoCloseable {
 
     /**
-     * Initializes and connects the transport.
+     * Connects the transport.
      *
-     * @throws Exception if connection fails
+     * @throws Exception if the connection fails
      */
     void connect() throws Exception;
 
     /**
-     * Sends data via broadcast (all instances listening on the channel will receive it).
+     * Publishes to every subscriber of a channel.
      *
-     * @param channel the target channel/topic
-     * @param data the serialized data to send
+     * @param channel the logical channel
+     * @param data    the bytes
+     * @return a future that completes once the backend accepted the message, and fails if it did not
+     *         (disconnected, refused, ...)
      */
-    void broadcast(String channel, byte[] data);
+    CompletableFuture<Void> broadcast(String channel, byte[] data);
 
     /**
-     * Sends data to a specific target instance (unicast).
+     * Publishes to the single instance subscribed with {@link #subscribeUnicast} under {@code targetId}.
      *
-     * @param channel the target channel/topic
-     * @param targetId the unique identifier of the target instance
-     * @param data the serialized data to send
+     * @param channel  the logical channel
+     * @param targetId the target instance id
+     * @param data     the bytes
+     * @return a future, as for {@link #broadcast}
      */
-    void sendTo(String channel, String targetId, byte[] data);
+    CompletableFuture<Void> sendTo(String channel, String targetId, byte[] data);
 
     /**
-     * Sends data via broadcast and waits for acknowledgment.
+     * Subscribes to the broadcasts of a channel. Subscribing a channel twice replaces the handler.
      *
-     * @param channel the target channel/topic
-     * @param data the serialized data to send
-     * @param timeoutMs timeout in milliseconds
-     * @return CompletableFuture containing the acknowledgment
+     * @param channel the logical channel
+     * @param handler called with (logical channel, bytes)
+     * @return a future that completes once the subscription is active
      */
-    CompletableFuture<AckResponse> broadcastWithAck(String channel, byte[] data, long timeoutMs);
+    CompletableFuture<Void> subscribe(String channel, BiConsumer<String, byte[]> handler);
 
     /**
-     * Sends data to a specific target and waits for acknowledgment.
+     * Subscribes to the messages sent to {@code instanceId} on a channel.
      *
-     * @param channel the target channel/topic
-     * @param targetId the unique identifier of the target instance
-     * @param data the serialized data to send
-     * @param timeoutMs timeout in milliseconds
-     * @return CompletableFuture containing the acknowledgment
+     * @param channel    the logical channel
+     * @param instanceId this instance id
+     * @param handler    called with (logical channel, bytes)
+     * @return a future that completes once the subscription is active
      */
-    CompletableFuture<AckResponse> sendToWithAck(String channel, String targetId, byte[] data, long timeoutMs);
+    CompletableFuture<Void> subscribeUnicast(String channel, String instanceId, BiConsumer<String, byte[]> handler);
 
     /**
-     * Subscribes to a channel to receive broadcast messages.
+     * Stops receiving the broadcasts of a channel.
      *
-     * @param channel the channel to subscribe to
-     * @param handler the callback to handle received data (channel, data)
+     * @param channel the logical channel
+     * @return a future that completes once unsubscribed
      */
-    void subscribe(String channel, BiConsumer<String, byte[]> handler);
+    CompletableFuture<Void> unsubscribe(String channel);
 
     /**
-     * Subscribes to receive unicast messages targeted to this instance.
+     * Stops receiving the messages sent to {@code instanceId} on a channel.
      *
-     * @param channel the channel to subscribe to
-     * @param instanceId the unique identifier of this instance
-     * @param handler the callback to handle received data (channel, data)
+     * @param channel    the logical channel
+     * @param instanceId this instance id
+     * @return a future that completes once unsubscribed
      */
-    void subscribeUnicast(String channel, String instanceId, BiConsumer<String, byte[]> handler);
+    CompletableFuture<Void> unsubscribeUnicast(String channel, String instanceId);
 
     /**
-     * Unsubscribes from a channel.
-     *
-     * @param channel the channel to unsubscribe from
-     */
-    void unsubscribe(String channel);
-
-    /**
-     * Checks if the transport is currently connected.
-     *
-     * @return true if connected
+     * @return whether the transport is connected
      */
     boolean isConnected();
 
-
     /**
-     * Sends an ACK response back to the sender.
-     * Uses transport-specific metadata to route the response correctly.
+     * The prefix applied to every physical channel name, so that environments sharing a backend
+     * do not see each other. Signed into every envelope.
      *
-     * @param channel the original channel
-     * @param data the ACK response data
-     * @param metadata transport-specific metadata (e.g., replyTo, correlationId for RabbitMQ)
+     * @return the prefix, {@code ""} when none
      */
-    default void sendAckResponse(String channel, byte[] data, Map<String, String> metadata) {
-        // Default implementation: just broadcast on the channel
-        broadcast(channel, data);
+    default String channelPrefix() {
+        return "";
     }
 
     /**
-     * Gets the transport type identifier.
-     *
-     * @return transport type (e.g., "redis", "rabbitmq")
+     * @return transport type (e.g. "redis", "rabbitmq", "memory")
      */
     String getType();
 

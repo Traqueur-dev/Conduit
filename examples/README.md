@@ -262,7 +262,7 @@ Publishing business events...
 If you have the Conduit JARs in your classpath:
 
 ```bash
-java -cp "conduit-core-1.1.0.jar:conduit-redis-1.1.0.jar:..." examples.basic.SimpleBroadcastExample
+java -cp "conduit-core-2.0.0.jar:conduit-redis-2.0.0.jar:..." examples.basic.SimpleBroadcastExample
 ```
 
 ### Option 2: Using Gradle

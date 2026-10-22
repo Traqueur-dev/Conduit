@@ -3,33 +3,32 @@ package fr.traqueur.conduit.packet;
 import fr.traqueur.conduit.core.Conduit;
 import fr.traqueur.conduit.core.PacketMeta;
 
+import java.util.concurrent.CompletableFuture;
+
 /**
- * Base interface for all packets in the Conduit system.
- * Implementations should be records with all necessary data fields.
- * 
- * <p>Example:</p>
+ * Base interface for all packets. Implementations should be records.
+ *
  * <pre>
- * public record PlayerJoinPacket(UUID playerId, String playerName) implements Packet {
- *     // No additional code needed!
- * }
- * </pre>
- * 
- * <p>By default, packets are sent to the default channel. 
- * Use {@link PacketMeta} annotation to specify a custom channel:</p>
- * <pre>
- * {@literal @}PacketMeta(channel = "events")
+ * {@literal @}PacketMeta(channel = "events", wire = "events.start.v1")
  * public record EventStartPacket(String eventId) implements Packet {}
  * </pre>
  *
+ * <p>The default methods go through the default instance ({@link Conduit#getInstance()}); with
+ * several instances, or one built {@linkplain Conduit.ConduitBuilder#unregistered() unregistered},
+ * call {@code conduit.send(packet)} instead.</p>
+ *
  * @author Traqueur
+ * @see PacketMeta
  */
 public interface Packet {
-    
+
     /**
-     * Sends this packet via broadcast (all instances listening on the channel will receive it).
-     * Uses the channel specified in {@link PacketMeta} annotation, or the default channel if not present.
+     * Broadcasts this packet through the default instance.
+     *
+     * @return a future that completes once the transport published it
+     * @throws IllegalStateException if there is no default instance
      */
-    default void send() {
-        Conduit.getInstance().send(this);
+    default CompletableFuture<Void> send() {
+        return Conduit.getInstance().send(this);
     }
 }

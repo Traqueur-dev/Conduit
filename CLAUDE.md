@@ -4,144 +4,94 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Conduit is a Java messaging system for distributed communication across microservices. It provides a unified abstraction layer over different transport mechanisms (Redis, RabbitMQ) with support for broadcast/unicast messaging, acknowledgments, and custom serialization/compression.
+Conduit is a Java messaging library for communication between services. It provides one
+abstraction over several transports (Redis Pub/Sub, RabbitMQ, in-memory), with broadcast and
+unicast, acknowledgments, signed envelopes, and custom serialization and compression.
 
 **Key Concepts:**
-- **Packets**: Records implementing the `Packet` interface that define message structure
-- **Conduit**: Multi-instance registry managing packet routing, serialization, and transport (supports multiple named instances)
-- **Transport**: Abstraction for different messaging backends (Redis PubSub, RabbitMQ exchanges)
-- **Handlers**: Callbacks registered to process incoming packets (sync `PacketHandler` or async `AsyncPacketHandler`)
-- **Channels**: Logical message routing paths, either default or custom via `@PacketMeta` annotation
+- **Packets**: Records implementing `Packet` (or `TargetablePacket`, `AcknowledgeablePacket`, `TargetableAcknowledgeablePacket`)
+- **Wire name**: The name a type travels under: `@PacketMeta(wire = ...)`, `registerPacket(wire, class)`, or else the simple class name
+- **Conduit**: One instance per process (or per library): packet/handler registries, routing, ACKs, verification. Instances are kept in a static registry unless built `.unregistered()`
+- **Transport**: Moves opaque bytes on named channels; knows nothing about ACKs or signatures
+- **Handlers**: A single `PacketHandler<T>` type. It returns `CompletableFuture<Void>`, or `null` for synchronous completion, and runs on the builder's `handlerExecutor` (default: the transport thread)
+- **Channels**: The default channel, plus any `@PacketMeta(channel = ...)`, reference-counted per registered type
 
 ## Project Structure
 
-This is a Gradle multi-module project with three modules:
+Gradle multi-module project:
 
-- **conduit-core**: Core abstractions including `Conduit`, `Transport`, `Packet`, serialization/compression
-- **conduit-redis**: Redis transport implementation using Lettuce async client
-- **conduit-rabbitmq**: RabbitMQ transport implementation using AMQP client
+- **conduit-core**: `Conduit`, `PacketEnvelope`, `ConduitMetrics`, registries, `Transport`, serialization/compression, `security` (signer/verifier, HMAC), `memory` (`InMemoryBus`, `InMemoryTransport`)
+- **conduit-redis**: `RedisTransport` (Lettuce async), `RedisConfig`
+- **conduit-rabbitmq**: `RabbitMQTransport` (AMQP client), `RabbitMQConfig`
+- **conduit-bom**: version alignment
 
 ## Build Commands
 
 ```bash
-# Build all modules
-./gradlew build
-
-# Build specific module
-./gradlew :conduit-core:build
-./gradlew :conduit-redis:build
-./gradlew :conduit-rabbitmq:build
-
-# Clean build
-./gradlew clean build
-
-# Run tests
-./gradlew test
-
-# Run tests for specific module
-./gradlew :conduit-core:test
-
-# Run single test class
-./gradlew :conduit-core:test --tests "fr.traqueur.conduit.core.BaseConduitIntegrationTest"
-
-# Generate Javadoc
+./gradlew build                      # build + test everything (Redis/RabbitMQ tests need Docker)
+./gradlew :conduit-core:test         # core + in-memory tests, no Docker
+./gradlew :conduit-redis:test
+./gradlew :conduit-rabbitmq:test
+./gradlew :conduit-core:test --tests "fr.traqueur.conduit.core.InMemoryConduitIntegrationTest"
 ./gradlew javadoc
-
-# Publish to Maven repository
-./gradlew publishAll  # Publishes all subprojects
+./gradlew publishAll
 ```
 
 ## Architecture
 
 ### Initialization Flow
 
-1. Create `Conduit` instance via builder with chosen transport (optional `.name()` for registry lookup)
-2. Register packet types via `registerPacket()`
-3. Register handlers via `registerHandler()` or `registerAsyncHandler()`
-4. Call `start()` to connect transport and subscribe to channels
-5. Send/receive packets via `send()`, `sendTo()`, `sendWithAck()`
-6. On shutdown, call `shutdown()` (removes instance from registry)
+1. `Conduit.builder().transport(t)...build()` (options: `name`, `instanceId`, `defaultChannel`, `unregistered`, `requireWireNames`, `handlerExecutor`, `signer`, `verifier`, `maxClockSkew`, `clock`)
+2. `registerPacket()` / `registerHandler()`, before or after start
+3. `start()`: connects, subscribes the default channel, the reply channel `<defaultChannel>:ack` (unicast) and every registered custom channel, and returns once all subscriptions are active
+4. `send()` / `sendTo()` return `CompletableFuture<Void>` (published or failed); `sendWithAck()` returns `CompletableFuture<AckResponse>`
+5. `unregisterPacket()` / `unregisterHandler()` at any time
+6. `shutdown()`: leaves the registry, fails pending ACKs, closes the transport
 
 ### Packet Lifecycle
 
-**Sending:**
-1. User calls `packet.send()` or similar method
-2. `Conduit` wraps packet in `PacketEnvelope` with metadata
-3. Packet serialized via `Serializer` (default: JSON)
-4. Data compressed via `Compressor` (default: no compression)
-5. Envelope sent via `Transport` to appropriate channel
+**Sending:** serialize → compress → `PacketEnvelope.packet(...)` (packetId, timestamp, sender, namespace = transport prefix, channel, target, wire name, reply channel) → `encode(signer)` → `transport.broadcast/sendTo`.
 
-**Receiving:**
-1. `Transport` receives raw bytes from channel
-2. `Conduit.handleIncomingPacket()` deserializes envelope
-3. Checks if packet is from self (ignores broadcast loops)
-4. Guards against empty payload (WARN log)
-5. Deserializes packet payload to registered packet class
-6. Dispatches to registered `PacketHandler` or `AsyncPacketHandler` (via `dispatchAsync`)
-7. If ACK required, sends response back to sender; if no handler, sends automatic NACK
+**Receiving** (`Conduit.receive`):
+1. Decode (version byte `0x02`; anything else is refused)
+2. Ignore own broadcasts
+3. Routing checks: namespace + channel equal where it arrived; target null on broadcast, self on unicast; ACK responses only on the reply channel
+4. If a verifier is set: signature present, verifier verdict, clock skew, replay guard (`keyId/packetId` kept for `maxClockSkew`)
+5. ACK response → completes the pending future (unicast requests: only from the target)
+6. Unknown wire name → `unknownType` counter, debug log once, NACK if an ACK was requested
+7. Deserialize, then dispatch on `handlerExecutor`. A rejection, a thrown exception or a failed future → `handlerFailures` + NACK
+
+Refusals are counted (`refused`), never answered, and logged at most once per sender per minute.
 
 ### Transport Implementations
 
-**Redis (`RedisTransport`):**
-- Uses Lettuce async client with PubSub
-- Broadcast: publishes to channel
-- Unicast: publishes to `channel:instanceId`
-- ACK: temporary channels `channel:ack:ackId`
-- Metadata injection: `redis.ackChannel` for ACK routing
+Every transport applies an optional `channelPrefix()` to physical names. That prefix is signed as the envelope's namespace.
 
-**RabbitMQ (`RabbitMQTransport`):**
-- Uses RabbitMQ AMQP client
-- Broadcast: fanout exchanges `conduit.broadcast.{channel}`
-- Unicast: direct exchanges `conduit.direct.{channel}` with routing key = instanceId
-- ACK: RabbitMQ request/reply pattern with correlationId and temporary reply queues
-- Metadata injection: `rabbitmq.replyTo` and `rabbitmq.correlationId` for ACK routing
+- **Redis**: Broadcast `<prefix><channel>`, unicast `<prefix><channel>:<instanceId>`, with one `Dispatcher` listener routing by channel. Built from `RedisConfig`, a `RedisURI` or a provided `RedisClient`. A provided client and its resources are never closed.
+- **RabbitMQ**: Fanout `conduit.broadcast.<channel>` (exclusive queue per subscriber), direct `conduit.direct.<channel>` (routing key = instanceId). Separate publish/consume channels, each with its own lock; `declaredExchanges` cache. Blocking: futures are already complete.
+- **In-memory**: `InMemoryBus` with Redis semantics. Synchronous by default, `InMemoryBus.async()` for ordered background delivery. `disconnect`/`reconnect`/`dropNext`/`dropAcks` simulate failures.
 
-### Key Design Patterns
-
-- **Registry**: `Conduit` instances are stored in a static `ConcurrentHashMap`; first built becomes `defaultInstance`. Named instances retrieved via `getInstance(String)`.
-- **Builder**: `Conduit.builder()` for flexible configuration, with optional `.name(String)` for registry key
-- **Template Method**: `Transport` interface with default `sendAckResponse()` method
-- **Registry**: `PacketRegistry` and `HandlerRegistry` for type-safe packet/handler lookup
-- **Envelope Pattern**: `PacketEnvelope` wraps packets with metadata and routing info
-
-## Module Dependencies
-
-```
-conduit-core (no dependencies)
-    |
-    +-- conduit-redis (depends on core + Lettuce)
-    |
-    +-- conduit-rabbitmq (depends on core + RabbitMQ AMQP client)
-```
-
-**Test Dependencies:**
-- JUnit Jupiter 6.0.1
-- AssertJ 3.27.6
-- Awaitility 4.3.0 (for async testing)
-- Testcontainers (Redis/RabbitMQ modules for integration tests)
-
-## Testing Strategy
-
-- **Unit tests**: Test individual components in isolation
-- **Integration tests**: Use Testcontainers to spin up real Redis/RabbitMQ instances
-- Base test class `BaseConduitIntegrationTest` in conduit-core provides shared test utilities
-- Test artifacts from conduit-core are exported via `testArtifacts` configuration for reuse in transport modules
+ACKs never go through transport-specific code: a responder does `transport.sendTo(replyChannel, requesterId, ackEnvelope)`.
 
 ## Important Implementation Notes
 
-1. **Instance ID filtering**: Conduit automatically filters out broadcast messages sent by itself using `instanceId` in envelope metadata
-2. **ACK routing**: Each transport implements custom ACK routing via metadata (Redis uses temporary channels, RabbitMQ uses reply queues)
-3. **Channel subscription**: Channels are subscribed at `start()` time, including default channel + any custom channels from `@PacketMeta`
-4. **Async operations**: Redis transport uses fully async operations with `CompletableFuture`, RabbitMQ uses blocking operations internally
-5. **Error handling**: `PacketHandler` is void; if no handler exists, automatic NACK is sent. `AsyncPacketHandler` returns `CompletableFuture<Void>`; exceptions cause NACK.
-6. **Handler types**: Use `registerHandler()` for synchronous handlers, `registerAsyncHandler()` for async. No default executor provided — supply your own via `CompletableFuture.runAsync(..., executor)`.
-7. **Multi-instance**: `Conduit.resetAll()` (package-private) is available in tests via `BaseConduitIntegrationTest` to clear all instances between test runs.
-8. **RabbitMQ thread-safety**: Two separate channels (`consumeChannel`/`publishChannel`) with `publishLock` protecting all publish operations. Exchange declarations are cached in `declaredExchanges`.
+1. **Wire format**: See `docs/ENVELOPE.md`. There are no metadata maps; every byte except the signature is signed.
+2. **Registration** is under `Conduit.lifecycleLock`, with `ChannelState.refs` per custom channel. `PacketRegistry` refuses a wire name for two classes, or a class under two names.
+3. **No swallowed errors**: send failures fail the future; transports catch handler exceptions so their delivery thread survives; every `catch` logs or propagates.
+4. **Registry**: The first registered instance is `defaultInstance`; a duplicate registry name is refused. `Conduit.resetAll()` (package-private) is for tests.
+5. **Metrics**: `ConduitMetrics`, made of `LongAdder`s; `byWire` only holds registered wire names.
+
+## Testing Strategy
+
+- `BaseConduitIntegrationTest` (in conduit-core tests, exported through the `testArtifacts` configuration) is the shared suite. Subclasses implement `newTransport()` and optionally `settle()`.
+- It runs on `InMemoryConduitIntegrationTest` (sync), `AsyncInMemoryConduitIntegrationTest`, `ConduitRedisIntegrationTest` and `ConduitRabbitMQIntegrationTest`.
+- Redis-only: `RedisTransportTest` (provided client, ACL `NOPERM`, prefix), `RedisConfigTest`, `DualClassLoaderRedisTest`.
+- Test dependencies: JUnit Jupiter 6, AssertJ, Awaitility, Testcontainers.
 
 ## Maven Publishing
 
-The project publishes to a custom Maven repository at `https://repo.groupez.dev/`. Credentials are required via environment variables `MAVEN_USERNAME` and `MAVEN_PASSWORD` or Gradle properties.
+Published to `https://repo.groupez.dev/`. Credentials come from `MAVEN_USERNAME`/`MAVEN_PASSWORD` or Gradle properties.
 
 ## CI/CD
 
-GitHub Actions workflow at `.github/workflows/build.yml` triggers on push/PR to main/develop branches and uses a reusable workflow from `GroupeZ-dev/actions` repository.
+`.github/workflows/build.yml` runs on push/PR to main/develop and uses a reusable workflow from `GroupeZ-dev/actions`.

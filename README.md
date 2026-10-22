@@ -30,7 +30,7 @@ Import `conduit-bom` to manage all module and dependency versions centrally:
 **Gradle (Kotlin DSL):**
 ```kotlin
 dependencies {
-    implementation(platform("fr.traqueur.conduit:conduit-bom:1.1.0"))
+    implementation(platform("fr.traqueur.conduit:conduit-bom:2.0.0"))
     implementation("fr.traqueur.conduit:conduit-redis")      // Redis transport
     // OR
     implementation("fr.traqueur.conduit:conduit-rabbitmq")  // RabbitMQ transport
@@ -44,7 +44,7 @@ dependencies {
     <dependency>
       <groupId>fr.traqueur.conduit</groupId>
       <artifactId>conduit-bom</artifactId>
-      <version>1.1.0</version>
+      <version>2.0.0</version>
       <type>pom</type>
       <scope>import</scope>
     </dependency>
@@ -64,9 +64,9 @@ dependencies {
 ```gradle
 dependencies {
     // Choose your transport (conduit-core is included transitively)
-    implementation 'fr.traqueur.conduit:conduit-redis:1.1.0'
+    implementation 'fr.traqueur.conduit:conduit-redis:2.0.0'
     // OR
-    implementation 'fr.traqueur.conduit:conduit-rabbitmq:1.1.0'
+    implementation 'fr.traqueur.conduit:conduit-rabbitmq:2.0.0'
 }
 ```
 
@@ -121,9 +121,12 @@ conduit.start();
 #### 4. Send Messages
 
 ```java
-// Broadcast to all instances
-ChatMessagePacket packet = new ChatMessagePacket(UUID.randomUUID(), "Hello World!");
-packet.send();
+// Broadcast to all instances; the future says whether the transport published it
+conduit.send(new ChatMessagePacket(UUID.randomUUID(), "Hello World!"))
+    .exceptionally(error -> { log.warn("not sent", error); return null; });
+
+// Or through the default instance
+new ChatMessagePacket(UUID.randomUUID(), "Hello World!").send();
 ```
 
 ## Usage Examples
@@ -238,14 +241,28 @@ RedisConfig config = RedisConfig.localhost();
 // Custom host/port
 RedisConfig config = RedisConfig.of("redis.example.com", 6379);
 
-// With authentication
-RedisConfig config = RedisConfig.of("redis.example.com", 6379, "password");
-
-// Full configuration
-RedisConfig config = new RedisConfig("host", 6379, "password", 0);
+// Full configuration: ACL user, database, TLS, command timeout
+RedisConfig config = RedisConfig.builder("redis.example.com", 6380)
+    .credentials("lobby", "password")
+    .database(0)
+    .ssl()
+    .timeout(Duration.ofSeconds(2))
+    .build();
 
 RedisTransport transport = new RedisTransport(config);
+
+// Or from a Lettuce URI (anything RedisConfig does not cover)
+RedisTransport transport = new RedisTransport(RedisURI.create("rediss://lobby:pw@redis:6380/0"));
+
+// Or on the application's own client, which the transport never closes,
+// with every channel prefixed so environments sharing one Redis do not see each other
+RedisTransport transport = RedisTransport.builder()
+    .client(applicationRedisClient)
+    .channelPrefix("prod:")
+    .build();
 ```
+
+A refused publication (Redis down, ACL `NOPERM`...) fails the future returned by `send`.
 
 ### RabbitMQ
 
@@ -269,6 +286,81 @@ RabbitMQTransport transport = new RabbitMQTransport(config);
 ```
 
 ## Advanced Usage
+
+### Wire Names
+
+The name a type travels under is what receivers use to find its class. Make it explicit, unique,
+and stable across renames:
+
+```java
+@PacketMeta(channel = "shop", wire = "shop.rotation.v1")
+public record ShopRotationPacket(String shopId, String periodKey) implements Packet {}
+
+conduit.registerPacket(ShopRotationPacket.class);                    // uses `wire`
+conduit.registerPacket("shop.rotation.v1", ShopRotationPacket.class); // or explicitly
+```
+
+Without `wire`, the class simple name is used. One wire name for two classes is refused.
+`Conduit.builder().requireWireNames()` refuses any type without an explicit name.
+
+### Registering and Removing at Runtime
+
+Types and handlers can come and go after `start()`: a module enabled on a running server works.
+
+```java
+conduit.registerPacket(ShopRotationPacket.class).join(); // subscribes "shop" if needed
+conduit.registerHandler(ShopRotationPacket.class, handler);
+// ...
+conduit.unregisterPacket(ShopRotationPacket.class);       // removes the type and its handler;
+                                                          // unsubscribes "shop" once unused
+```
+
+Channels are reference-counted, and the default channel is never unsubscribed. A packet of a
+removed type is handled as an unknown type: it is logged once at debug level, and NACKed if it
+asked for an ACK.
+
+### Handler Executor
+
+```java
+Conduit.builder()
+    .transport(transport)
+    .handlerExecutor(mainThreadExecutor) // default: the transport thread
+    .build();
+```
+
+Every handler runs on that executor; decoding stays on the transport thread. A single-threaded
+executor keeps the order of reception. A refused task drops the packet: it is logged, counted, and
+NACKed if it asked for an ACK.
+
+### Signed Envelopes
+
+```java
+Conduit.builder()
+    .signer(HmacSigner.sha256("paper-lobby-1", secret))
+    .verifier(HmacVerifier.sha256(keysById).and((keyId, env) -> myPolicy(keyId, env)))
+    .maxClockSkew(Duration.ofSeconds(30))
+    .build();
+```
+
+With a verifier, an envelope is refused (no handler, no NACK, counted) if it is unsigned, badly
+signed, too old or too far in the future, a replay, built for another channel or target, or
+refused by the policy. ACKs are signed too. The exact format and the order of the checks are in
+[docs/ENVELOPE.md](docs/ENVELOPE.md).
+
+### Metrics
+
+```java
+ConduitMetrics m = conduit.metrics();
+m.sent(); m.received(); m.sendFailures(); m.handlerFailures();
+m.refused(); m.ackTimeouts(); m.unknownType();
+m.byWire(); // Map<String, Counts>, per registered wire name
+```
+
+### Instances Outside the Registry
+
+`Conduit.builder()...unregistered().build()` creates an instance that is never the default and
+never found by `getInstance(name)`. Use it when several libraries in one JVM each embed Conduit,
+and send with `conduit.send(packet)`.
 
 ### Combined Unicast + Acknowledgment
 
@@ -355,60 +447,57 @@ conduit.registerHandler(MyPacket.class, (packet, ackCallback) -> {
 ### Packet Lifecycle
 
 **Sending:**
-1. User calls `packet.send()` or similar method
-2. `Conduit` wraps packet in `PacketEnvelope` with metadata
-3. Packet serialized (JSON by default)
-4. Data compressed (if enabled)
-5. Envelope sent via `Transport` to appropriate channel
+1. User calls `conduit.send(packet)` (or `packet.send()`)
+2. Packet serialized (JSON by default), then compressed (if enabled)
+3. `Conduit` wraps it in a `PacketEnvelope`: id, timestamp, sender, channel, target, wire name, and a signature if a signer is set
+4. Envelope published via `Transport`; the returned future completes once it is published
 
 **Receiving:**
 1. `Transport` receives raw bytes from channel
-2. `Conduit` deserializes envelope
-3. Filters self-sent broadcast messages
-4. Deserializes packet payload
-5. Dispatches to registered `PacketHandler`
-6. Sends ACK response if required
+2. `Conduit` decodes the envelope and ignores its own broadcasts
+3. Checks routing, then signature, clock skew and replay (if a verifier is set)
+4. Looks the wire name up, deserializes the payload
+5. Dispatches to the registered `PacketHandler` on the handler executor
+6. Sends the ACK response to the sender's reply channel if required
 
 ### Transport Implementations
 
 - **Redis**: Uses Lettuce async client with PubSub. Unicast via `channel:instanceId` pattern.
 - **RabbitMQ**: Uses AMQP client with fanout exchanges (broadcast) and direct exchanges (unicast).
+- **In-memory** (`InMemoryBus`, in `conduit-core`): the same semantics in-process, for tests.
+
+ACKs travel back on one reply channel per instance (`<defaultChannel>:ack`, unicast to the
+requester), subscribed once at start.
 
 ## Best Practices
 
 1. **Instance IDs**: Use meaningful instance identifiers (e.g., "lobby-server-1", "game-server-2")
 2. **Channel Organization**: Group related packets into custom channels for better organization
 3. **Packet Design**: Keep packets immutable and use records for simplicity
-4. **Handler Registration**: Register all packets and handlers before calling `start()`
+4. **Wire Names**: Give every packet an explicit `@PacketMeta(wire = ...)` and turn on `requireWireNames()`
 5. **Shutdown**: Always call `conduit.shutdown()` to clean up resources
 6. **ACK Timeouts**: Set reasonable timeouts based on expected processing time
 7. **Error Handling**: Always handle errors in packet handlers and send appropriate ACK responses
 
 ## Testing
 
-Conduit includes comprehensive test utilities:
+No Docker needed: an `InMemoryBus` connects instances in-process, with the semantics of Redis.
 
 ```java
-import fr.traqueur.conduit.core.BaseConduitIntegrationTest;
+InMemoryBus bus = new InMemoryBus();                 // synchronous: delivered before send returns
+Conduit a = Conduit.builder().transport(bus.transport()).instanceId("a").unregistered().build();
+Conduit b = Conduit.builder().transport(bus.transport()).instanceId("b").unregistered().build();
+// register, start, then:
+a.send(new ChatMessagePacket(id, "hi"));             // b's handler has already run here
 
-class MyConduitTest extends BaseConduitIntegrationTest {
-    @Override
-    protected void setupConduitInstances() throws Exception {
-        // Setup two conduit instances for testing
-        conduit1 = Conduit.builder()
-            .transport(new RedisTransport(config))
-            .instanceId("test-1")
-            .build();
-
-        conduit2 = Conduit.builder()
-            .transport(new RedisTransport(config))
-            .instanceId("test-2")
-            .build();
-    }
-
-    // Tests are inherited from BaseConduitIntegrationTest
-}
+bus.disconnect(a.transport());  // a's sends fail, a receives nothing
+bus.dropNext(2);                // the next two messages are lost
+bus.dropAcks(1);                // the next ACK never arrives: the request times out
+InMemoryBus.async();            // delivery on a background thread, in order
 ```
+
+The shared suite `BaseConduitIntegrationTest` (test artifact of `conduit-core`) runs on every
+transport; a transport module only provides `newTransport()`.
 
 ## Performance Considerations
 

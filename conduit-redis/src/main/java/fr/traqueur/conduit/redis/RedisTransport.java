@@ -1,7 +1,5 @@
 package fr.traqueur.conduit.redis;
 
-import fr.traqueur.conduit.core.AckResponse;
-import fr.traqueur.conduit.core.PacketEnvelope;
 import fr.traqueur.conduit.transport.Transport;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisURI;
@@ -10,6 +8,7 @@ import io.lettuce.core.api.async.RedisAsyncCommands;
 import io.lettuce.core.codec.ByteArrayCodec;
 import io.lettuce.core.codec.RedisCodec;
 import io.lettuce.core.codec.StringCodec;
+import io.lettuce.core.pubsub.RedisPubSubAdapter;
 import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
 import io.lettuce.core.pubsub.api.async.RedisPubSubAsyncCommands;
 import io.lettuce.core.resource.DefaultClientResources;
@@ -18,54 +17,95 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Map;
-import java.util.UUID;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 
 /**
- * Redis transport implementation using Lettuce (async).
+ * Redis Pub/Sub transport (Lettuce, async).
  *
- * <p>Redis is naturally a broadcast system (PUB/SUB).
- * For unicast, we use channel suffixes: channel:instanceId</p>
+ * <p>Broadcast publishes on {@code <prefix><channel>}, unicast on
+ * {@code <prefix><channel>:<instanceId>}. The transport opens two connections (commands and
+ * Pub/Sub) and a single listener that routes each message by channel.</p>
+ *
+ * <pre>
+ * new RedisTransport(RedisConfig.of("localhost", 6379));                  // its own client
+ * new RedisTransport(RedisURI.create("rediss://user:pw@redis:6380/0"));   // ACL user, TLS, timeout...
+ * new RedisTransport(applicationClient);                                  // the application's client
+ * RedisTransport.builder().client(applicationClient).channelPrefix("valkn-prod:").build();
+ * </pre>
+ *
+ * <p>A client passed in is never closed nor shut down by {@link #close()}, and neither are its
+ * {@code ClientResources}: only the connections this transport opened are closed.</p>
  *
  * @author Traqueur
  */
 public class RedisTransport implements Transport {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(RedisTransport.class);
+    private static final RedisCodec<String, byte[]> CODEC = RedisCodec.of(StringCodec.UTF8, ByteArrayCodec.INSTANCE);
 
-    private final RedisConfig config;
-    private DefaultClientResources clientResources;
-    private RedisClient client;
+    private final RedisURI uri;
+    private final RedisClient providedClient;
+    private final String channelPrefix;
+
+    private DefaultClientResources ownedResources;
+    private RedisClient ownedClient;
     private StatefulRedisConnection<String, byte[]> connection;
     private StatefulRedisPubSubConnection<String, byte[]> pubSubConnection;
-    private RedisAsyncCommands<String, byte[]> asyncCommands;
-    private RedisPubSubAsyncCommands<String, byte[]> pubSubAsyncCommands;
+    private RedisAsyncCommands<String, byte[]> commands;
+    private RedisPubSubAsyncCommands<String, byte[]> pubSub;
 
-    // Pour gérer les ACK avec Redis (on utilise des channels temporaires)
-    private final Map<String, CompletableFuture<AckResponse>> pendingAcks = new ConcurrentHashMap<>();
+    private final Map<String, Route> routes = new ConcurrentHashMap<>();
 
     /**
-     * Creates a new Redis transport with the specified configuration.
+     * A transport that opens its own client.
      *
-     * @param config the Redis configuration
+     * @param config the connection settings
      */
     public RedisTransport(RedisConfig config) {
-        this.config = config;
+        this(uriOf(config), null, "");
     }
 
     /**
-     * The URI a config describes, built without opening anything.
+     * A transport that opens its own client from a URI (ACL user, TLS, timeout, sentinel...).
      *
-     * <p>Package-private and separate from {@link #connect()} so a test can assert what this
-     * transport will actually dial. Inlined, the only way to check that {@code ssl} travels was to
-     * rebuild the URI in the test — which passes even when this method forgets it.
+     * @param uri the Redis URI
+     */
+    public RedisTransport(RedisURI uri) {
+        this(Objects.requireNonNull(uri, "uri"), null, "");
+    }
+
+    /**
+     * A transport on a client the application owns, which this transport never closes.
      *
-     * <p>TLS is a property of the PORT, and that is why it has to be here: a Redis published with
-     * {@code tls-port} refuses a cleartext handshake, and a cleartext port refuses a TLS one. Every
-     * other client sharing that host and port has to agree, or half of them go quiet together.
+     * @param client the client
+     */
+    public RedisTransport(RedisClient client) {
+        this(null, Objects.requireNonNull(client, "client"), "");
+    }
+
+    private RedisTransport(RedisURI uri, RedisClient providedClient, String channelPrefix) {
+        this.uri = uri;
+        this.providedClient = providedClient;
+        this.channelPrefix = channelPrefix == null ? "" : channelPrefix;
+    }
+
+    /**
+     * @return a builder
+     */
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    /**
+     * The URI a config describes, built without opening anything. Package-private so a test can
+     * assert what this transport will actually dial.
+     *
+     * <p>TLS is a property of the PORT: a Redis published with {@code tls-port} refuses a
+     * cleartext handshake, and a cleartext port refuses a TLS one.
      */
     static RedisURI uriOf(RedisConfig config) {
         RedisURI.Builder builder = RedisURI.builder()
@@ -73,207 +113,91 @@ public class RedisTransport implements Transport {
                 .withPort(config.port())
                 .withDatabase(config.database());
         if (config.password() != null && !config.password().isEmpty()) {
-            builder.withPassword(config.password().toCharArray());
+            if (config.username() != null && !config.username().isEmpty()) {
+                builder.withAuthentication(config.username(), config.password().toCharArray());
+            } else {
+                builder.withPassword(config.password().toCharArray());
+            }
         }
         builder.withSsl(config.ssl());
         // Only ever RELAXED, never tightened: Lettuce verifies by default, so this line can only
-        // take a guarantee away. It is written as its own statement, guarded, so that reading it is
-        // reading a decision — `withVerifyPeer(config.verifyPeer())` unguarded would look like
-        // plumbing and would be just as easy to set wrong.
+        // take a guarantee away. Written as its own guarded statement so that reading it is
+        // reading a decision.
         if (config.ssl() && !config.verifyPeer()) {
             builder.withVerifyPeer(false);
+        }
+        if (config.timeout() != null) {
+            builder.withTimeout(config.timeout());
         }
         return builder.build();
     }
 
     @Override
-    public void connect() throws Exception {
-        RedisURI redisUri = uriOf(config);
-        RedisCodec<String, byte[]> codec = RedisCodec.of(StringCodec.UTF8, ByteArrayCodec.INSTANCE);
-
-        // Use JVM DNS resolver instead of Netty's async DnsAddressResolverGroup.
-        // Prevents classloader conflicts when multiple plugins each bundle Lettuce
-        // and are loaded via isolated PluginClassLoaders (e.g. PaperSpigot).
-        clientResources = DefaultClientResources.builder()
-                .addressResolverGroup(DefaultAddressResolverGroup.INSTANCE)
-                .build();
-        client = RedisClient.create(clientResources, redisUri);
-        connection = client.connect(codec);
-        pubSubConnection = client.connectPubSub(codec);
-
-        asyncCommands = connection.async();
-        pubSubAsyncCommands = pubSubConnection.async();
-
-        LOGGER.info("Connected to Redis at {}:{} (TLS: {}{})", config.host(), config.port(),
-                config.ssl(), config.ssl() && !config.verifyPeer() ? ", peer NOT verified" : "");
-    }
-
-    @Override
-    public void broadcast(String channel, byte[] data) {
-        asyncCommands.publish(channel, data)
-                .thenAccept(receivers -> LOGGER.debug("Published to channel: {} ({} receivers)", channel, receivers))
-                .exceptionally(error -> {
-                    LOGGER.error("Failed to publish to channel: {}", channel, error);
-                    return null;
-                });
-    }
-
-    @Override
-    public void sendTo(String channel, String targetId, byte[] data) {
-        // Unicast in Redis: publish to channel:targetId
-        String unicastChannel = channel + ":" + targetId;
-        asyncCommands.publish(unicastChannel, data)
-                .thenAccept(receivers -> LOGGER.debug("Published to unicast channel: {} ({} receivers)", unicastChannel, receivers))
-                .exceptionally(error -> {
-                    LOGGER.error("Failed to publish to unicast channel: {}", unicastChannel, error);
-                    return null;
-                });
-    }
-
-    @Override
-    public CompletableFuture<AckResponse> broadcastWithAck(String channel, byte[] data, long timeoutMs) {
-        String ackId = UUID.randomUUID().toString();
-        String ackChannel = channel + ":ack:" + ackId;
-
-        CompletableFuture<AckResponse> future = new CompletableFuture<>();
-        pendingAcks.put(ackId, future);
-
-        // Add listener for ACK channel
-        RedisAckListener ackListener = new RedisAckListener(ackChannel, ackId, pendingAcks);
-        pubSubConnection.addListener(ackListener);
-
-        // Subscribe to ACK channel then send
-        pubSubAsyncCommands.subscribe(ackChannel)
-                .thenCompose(v -> {
-                    // NOUVEAU: Inject metadata before sending
-                    try {
-                        PacketEnvelope envelope = PacketEnvelope.fromBytes(data);
-                        envelope.metadata().put("redis.ackChannel", ackChannel);
-                        byte[] modifiedData = envelope.toBytes();
-                        return asyncCommands.publish(channel, modifiedData);
-                    } catch (Exception e) {
-                        throw new RuntimeException(e);
-                    }
-                })
-                .exceptionally(error -> {
-                    future.completeExceptionally(error);
-                    pendingAcks.remove(ackId);
-                    return null;
-                });
-
-        // Timeout handling — attach cleanup to original future, not the orTimeout derivative
-        future.orTimeout(timeoutMs, TimeUnit.MILLISECONDS);
-        future.whenComplete((result, error) -> {
-            pendingAcks.remove(ackId);
-            pubSubAsyncCommands.unsubscribe(ackChannel);
-            pubSubConnection.removeListener(ackListener);
-        });
-
-        return future;
-    }
-
-    @Override
-    public CompletableFuture<AckResponse> sendToWithAck(String channel, String targetId, byte[] data, long timeoutMs) {
-        String ackId = UUID.randomUUID().toString();
-        String ackChannel = channel + ":ack:" + ackId;
-
-        CompletableFuture<AckResponse> future = new CompletableFuture<>();
-        pendingAcks.put(ackId, future);
-
-        String unicastChannel = channel + ":" + targetId;
-
-        // Add listener for ACK channel
-        RedisAckListener ackListener = new RedisAckListener(ackChannel, ackId, pendingAcks);
-        pubSubConnection.addListener(ackListener);
-
-        // Subscribe to ACK channel then send
-        pubSubAsyncCommands.subscribe(ackChannel)
-                .thenCompose(v -> {
-                    // NOUVEAU: Inject metadata before sending
-                    try {
-                        PacketEnvelope envelope = PacketEnvelope.fromBytes(data);
-                        envelope.metadata().put("redis.ackChannel", ackChannel);
-                        byte[] modifiedData = envelope.toBytes();
-                        return asyncCommands.publish(unicastChannel, modifiedData);
-                    } catch (Exception e) {
-                        throw new RuntimeException(e);
-                    }
-                })
-                .exceptionally(error -> {
-                    future.completeExceptionally(error);
-                    pendingAcks.remove(ackId);
-                    return null;
-                });
-
-        // Timeout handling — attach cleanup to original future, not the orTimeout derivative
-        future.orTimeout(timeoutMs, TimeUnit.MILLISECONDS);
-        future.whenComplete((result, error) -> {
-            pendingAcks.remove(ackId);
-            pubSubAsyncCommands.unsubscribe(ackChannel);
-            pubSubConnection.removeListener(ackListener);
-        });
-
-        return future;
-    }
-
-    @Override
-    public void subscribe(String channel, BiConsumer<String, byte[]> handler) {
-        pubSubConnection.addListener(new RedisMessageListener(channel, handler));
-        pubSubAsyncCommands.subscribe(channel)
-                .thenAccept(v -> LOGGER.info("Subscribed to broadcast channel: {}", channel))
-                .exceptionally(error -> {
-                    LOGGER.error("Failed to subscribe to channel: {}", channel, error);
-                    return null;
-                });
-    }
-
-    @Override
-    public void sendAckResponse(String channel, byte[] data, Map<String, String> metadata) {
-        // Redis: check if there's an ACK channel in metadata
-        String ackChannel = metadata.get("redis.ackChannel");
-
-        if (ackChannel != null) {
-            // Send to specific ACK channel
-            asyncCommands.publish(ackChannel, data)
-                    .thenAccept(receivers -> {
-                        LOGGER.debug("Sent ACK to channel: {} (receivers: {})", ackChannel, receivers);
-                    })
-                    .exceptionally(error -> {
-                        LOGGER.error("Failed to send ACK to channel: {}", ackChannel, error);
-                        return null;
-                    });
+    public void connect() {
+        RedisClient client;
+        if (providedClient != null) {
+            client = providedClient;
         } else {
-            // Fallback: broadcast on original channel
-            broadcast(channel, data);
+            // JVM DNS resolver instead of Netty's async DnsAddressResolverGroup: avoids classloader
+            // conflicts when several plugins each bundle Lettuce in isolated PluginClassLoaders (Paper).
+            ownedResources = DefaultClientResources.builder()
+                    .addressResolverGroup(DefaultAddressResolverGroup.INSTANCE)
+                    .build();
+            ownedClient = RedisClient.create(ownedResources, uri);
+            client = ownedClient;
+        }
+        connection = client.connect(CODEC);
+        pubSubConnection = client.connectPubSub(CODEC);
+        pubSubConnection.addListener(new Dispatcher());
+        commands = connection.async();
+        pubSub = pubSubConnection.async();
+
+        if (uri != null) {
+            LOGGER.info("Connected to Redis at {}:{} (TLS: {}{}), channel prefix '{}'", uri.getHost(), uri.getPort(),
+                    uri.isSsl(), uri.isSsl() && !uri.isVerifyPeer() ? ", peer NOT verified" : "", channelPrefix);
+        } else {
+            LOGGER.info("Connected to Redis through the provided client, channel prefix '{}'", channelPrefix);
         }
     }
 
-
     @Override
-    public void subscribeUnicast(String channel, String instanceId, BiConsumer<String, byte[]> handler) {
-        String unicastChannel = channel + ":" + instanceId;
-        pubSubConnection.addListener(new RedisMessageListener(unicastChannel, handler));
-        pubSubAsyncCommands.subscribe(unicastChannel)
-                .thenAccept(v -> LOGGER.info("Subscribed to unicast channel: {}", unicastChannel))
-                .exceptionally(error -> {
-                    LOGGER.error("Failed to subscribe to unicast channel: {}", unicastChannel, error);
-                    return null;
-                });
+    public CompletableFuture<Void> broadcast(String channel, byte[] data) {
+        return publish(channelPrefix + channel, data);
     }
 
     @Override
-    public void unsubscribe(String channel) {
-        pubSubAsyncCommands.unsubscribe(channel)
-                .thenAccept(v -> LOGGER.info("Unsubscribed from channel: {}", channel))
-                .exceptionally(error -> {
-                    LOGGER.error("Failed to unsubscribe from channel: {}", channel, error);
-                    return null;
-                });
+    public CompletableFuture<Void> sendTo(String channel, String targetId, byte[] data) {
+        return publish(channelPrefix + channel + ":" + targetId, data);
+    }
+
+    @Override
+    public CompletableFuture<Void> subscribe(String channel, BiConsumer<String, byte[]> handler) {
+        return subscribePhysical(channelPrefix + channel, channel, handler);
+    }
+
+    @Override
+    public CompletableFuture<Void> subscribeUnicast(String channel, String instanceId, BiConsumer<String, byte[]> handler) {
+        return subscribePhysical(channelPrefix + channel + ":" + instanceId, channel, handler);
+    }
+
+    @Override
+    public CompletableFuture<Void> unsubscribe(String channel) {
+        return unsubscribePhysical(channelPrefix + channel);
+    }
+
+    @Override
+    public CompletableFuture<Void> unsubscribeUnicast(String channel, String instanceId) {
+        return unsubscribePhysical(channelPrefix + channel + ":" + instanceId);
     }
 
     @Override
     public boolean isConnected() {
-        return connection != null && connection.isOpen();
+        return connection != null && connection.isOpen() && pubSubConnection != null && pubSubConnection.isOpen();
+    }
+
+    @Override
+    public String channelPrefix() {
+        return channelPrefix;
     }
 
     @Override
@@ -281,20 +205,143 @@ public class RedisTransport implements Transport {
         return "redis";
     }
 
+    /**
+     * Closes the connections this transport opened, and the client and resources only if it
+     * created them.
+     */
     @Override
-    public void close() throws Exception {
+    public void close() {
         if (pubSubConnection != null) {
             pubSubConnection.close();
         }
         if (connection != null) {
             connection.close();
         }
-        if (client != null) {
-            client.shutdown();
+        routes.clear();
+        if (ownedClient != null) {
+            ownedClient.shutdown();
         }
-        if (clientResources != null) {
-            clientResources.shutdown();
+        if (ownedResources != null) {
+            ownedResources.shutdown();
         }
         LOGGER.info("Redis transport closed");
+    }
+
+    private CompletableFuture<Void> publish(String physical, byte[] data) {
+        if (!isConnected()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Redis transport is not connected"));
+        }
+        return done(commands.publish(physical, data));
+    }
+
+    private CompletableFuture<Void> subscribePhysical(String physical, String logical, BiConsumer<String, byte[]> handler) {
+        if (!isConnected()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Redis transport is not connected"));
+        }
+        Route route = new Route(logical, handler);
+        routes.put(physical, route);
+        CompletableFuture<Void> subscribed = done(pubSub.subscribe(physical));
+        subscribed.whenComplete((v, error) -> {
+            if (error != null) {
+                routes.remove(physical, route);
+            } else {
+                LOGGER.debug("Subscribed to {}", physical);
+            }
+        });
+        return subscribed;
+    }
+
+    private CompletableFuture<Void> unsubscribePhysical(String physical) {
+        routes.remove(physical);
+        if (!isConnected()) {
+            return CompletableFuture.completedFuture(null); // Nothing is subscribed on a closed connection.
+        }
+        return done(pubSub.unsubscribe(physical));
+    }
+
+    private static CompletableFuture<Void> done(CompletionStage<?> stage) {
+        return stage.toCompletableFuture().thenApply(v -> null);
+    }
+
+    private record Route(String logical, BiConsumer<String, byte[]> handler) {}
+
+    /** The only listener: routes each message to the handler of its channel. */
+    private final class Dispatcher extends RedisPubSubAdapter<String, byte[]> {
+        @Override
+        public void message(String channel, byte[] message) {
+            Route route = routes.get(channel);
+            if (route == null) {
+                return; // Unsubscribed while the message was in flight.
+            }
+            try {
+                route.handler.accept(route.logical, message);
+            } catch (RuntimeException e) {
+                // Never let a handler break Lettuce's event loop.
+                LOGGER.error("Handler of Redis channel {} threw", channel, e);
+            }
+        }
+    }
+
+    /**
+     * Builder of {@link RedisTransport}: exactly one of {@link #config}, {@link #uri} or
+     * {@link #client}.
+     */
+    public static final class Builder {
+        private RedisURI uri;
+        private RedisClient client;
+        private String channelPrefix = "";
+
+        private Builder() {
+        }
+
+        /**
+         * @param config settings of a client the transport opens and owns
+         * @return this builder
+         */
+        public Builder config(RedisConfig config) {
+            this.uri = uriOf(config);
+            return this;
+        }
+
+        /**
+         * @param uri URI of a client the transport opens and owns
+         * @return this builder
+         */
+        public Builder uri(RedisURI uri) {
+            this.uri = uri;
+            return this;
+        }
+
+        /**
+         * @param client a client the application owns; never closed by the transport
+         * @return this builder
+         */
+        public Builder client(RedisClient client) {
+            this.client = client;
+            return this;
+        }
+
+        /**
+         * A prefix for every channel (broadcast, unicast, ACK), so that environments sharing one
+         * Redis do not see each other. Signed into every envelope.
+         *
+         * @param channelPrefix the prefix, e.g. {@code "valkn-prod:"}
+         * @return this builder
+         */
+        public Builder channelPrefix(String channelPrefix) {
+            this.channelPrefix = channelPrefix;
+            return this;
+        }
+
+        /**
+         * @return the transport
+         * @throws IllegalStateException unless exactly one of config, uri or client was given
+         */
+        public RedisTransport build() {
+            if ((uri == null) == (client == null)) {
+                throw new IllegalStateException("Give exactly one of config(), uri() or client()");
+            }
+            return new RedisTransport(uri, client, channelPrefix);
+        }
     }
 }

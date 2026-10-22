@@ -33,7 +33,7 @@ public interface TargetableAcknowledgeablePacket extends TargetablePacket, Ackno
      * @throws UnsupportedOperationException always thrown
      */
     @Override
-    default void send() {
+    default CompletableFuture<Void> send() {
         throw new UnsupportedOperationException(
                 "Use sendWithAck(targetId) for acknowledgeable packets. Regular send() is not supported."
         );
@@ -46,7 +46,7 @@ public interface TargetableAcknowledgeablePacket extends TargetablePacket, Ackno
      * @throws UnsupportedOperationException always thrown
      */
     @Override
-    default void sendTo(String targetId) {
+    default CompletableFuture<Void> sendTo(String targetId) {
         throw new UnsupportedOperationException(
             "Use sendWithAck(targetId) for acknowledgeable packets. Regular sendTo() is not supported."
         );
