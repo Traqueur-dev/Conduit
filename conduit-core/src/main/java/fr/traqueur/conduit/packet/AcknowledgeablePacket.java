@@ -33,7 +33,7 @@ public interface AcknowledgeablePacket extends Packet {
      * @throws UnsupportedOperationException always thrown
      */
     @Override
-    default void send() {
+    default CompletableFuture<Void> send() {
         throw new UnsupportedOperationException(
             "Use sendWithAck() for acknowledgeable packets. Regular send() is not supported."
         );

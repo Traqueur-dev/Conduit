@@ -22,6 +22,12 @@ Complete documentation for the Conduit messaging library.
    - Real-world use cases
    - Troubleshooting guide
 
+4. **[CHANGELOG.md](CHANGELOG.md)**
+   - What changed in each version, and how to migrate from 1.3.0 to 2.0.0
+
+5. **[docs/ENVELOPE.md](docs/ENVELOPE.md)**
+   - Exact wire format (version 2), routing, signature and verification order
+
 ## Core Documentation
 
 ### User Guides

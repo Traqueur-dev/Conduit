@@ -1,135 +1,154 @@
 package fr.traqueur.conduit.redis;
 
+import java.time.Duration;
+
 /**
- * Configuration for Redis transport.
+ * Connection settings for a {@link RedisTransport} that opens its own client. To reuse a client
+ * the application already has, pass it to {@link RedisTransport#RedisTransport(io.lettuce.core.RedisClient)}
+ * instead; for anything this record does not cover, pass a {@link io.lettuce.core.RedisURI}.
  *
- * @param host Redis server host
- * @param port Redis server port
- * @param password Redis password (null if no auth)
- * @param database Redis database number (0-15)
- * @param ssl whether to speak TLS to that port ({@code rediss://})
+ * @param host       Redis server host
+ * @param port       Redis server port
+ * @param username   ACL user name, or null for the {@code default} user
+ * @param password   password, or null for no authentication
+ * @param database   database number
+ * @param ssl        whether to speak TLS to that port ({@code rediss://})
  * @param verifyPeer whether to verify the server's certificate and hostname. {@code true} is the
  *                   only safe default; {@code false} keeps the wire ENCRYPTED and stops
  *                   AUTHENTICATING the server, which is a deliberate trade, not a fallback
+ * @param timeout    command timeout, or null for Lettuce's default (60 seconds)
  *
  * @author Traqueur
  */
 public record RedisConfig(
     String host,
     int port,
+    String username,
     String password,
     int database,
     boolean ssl,
-    boolean verifyPeer
+    boolean verifyPeer,
+    Duration timeout
 ) {
 
     /**
-     * Without TLS — the four-argument shape this record had before {@code ssl} existed.
+     * Local Redis: {@code localhost:6379}, no authentication, database 0.
      *
-     * <p>Kept so the change is compatible at the SOURCE and at the BINARY level: the canonical
-     * four-argument constructor's descriptor still exists, so callers compiled against 1.1.4 keep
-     * linking. Every existing caller reaches TLS by adding one argument, not by being rewritten.
-     */
-    public RedisConfig(String host, int port, String password, int database) {
-        this(host, port, password, database, false, true);
-    }
-
-    /**
-     * With TLS, verifying the peer — the five-argument shape of 1.2.0.
-     *
-     * <p>Kept for the same reason as the four-argument one, and it defaults {@code verifyPeer} to
-     * {@code true}: a caller that said « use TLS » and nothing else asked for the strong form. A
-     * five-argument call silently becoming unauthenticated would be the worst kind of compatibility.
-     */
-    public RedisConfig(String host, int port, String password, int database, boolean ssl) {
-        this(host, port, password, database, ssl, true);
-    }
-    
-    /**
-     * Creates a default local Redis config (localhost:6379, no password, db 0).
-     *
-     * @return a default local Redis configuration
+     * @return the configuration
      */
     public static RedisConfig localhost() {
-        return new RedisConfig("localhost", 6379, null, 0, false, true);
+        return builder("localhost", 6379).build();
     }
 
     /**
-     * Creates a Redis config with custom host and port.
-     *
-     * @param host the Redis server host
-     * @param port the Redis server port
-     * @return a Redis configuration
+     * @param host the host
+     * @param port the port
+     * @return a configuration without authentication nor TLS
      */
     public static RedisConfig of(String host, int port) {
-        return new RedisConfig(host, port, null, 0, false, true);
+        return builder(host, port).build();
     }
 
     /**
-     * Creates a Redis config with authentication.
-     *
-     * @param host the Redis server host
-     * @param port the Redis server port
-     * @param password the Redis password
-     * @return a Redis configuration with authentication
+     * @param host the host
+     * @param port the port
+     * @return a builder starting from no authentication, database 0, no TLS
      */
-    public static RedisConfig of(String host, int port, String password) {
-        return new RedisConfig(host, port, password, 0, false, true);
+    public static Builder builder(String host, int port) {
+        return new Builder(host, port);
+    }
+
+    /** The password never appears here. */
+    @Override
+    public String toString() {
+        return "RedisConfig[" + (ssl ? "rediss://" : "redis://") + (username != null ? username + "@" : "")
+                + host + ":" + port + "/" + database + (password != null ? ", password=***" : "")
+                + (ssl && !verifyPeer ? ", peer NOT verified" : "") + (timeout != null ? ", timeout=" + timeout : "") + "]";
     }
 
     /**
-     * Creates a Redis config with authentication, over TLS.
-     *
-     * @param host the Redis server host
-     * @param port the Redis server port
-     * @param password the Redis password
-     * @param ssl whether to speak TLS
-     * @return a Redis configuration
+     * Builder of {@link RedisConfig}.
      */
-    public static RedisConfig of(String host, int port, String password, boolean ssl) {
-        return new RedisConfig(host, port, password, 0, ssl, true);
-    }
+    public static final class Builder {
+        private final String host;
+        private final int port;
+        private String username;
+        private String password;
+        private int database;
+        private boolean ssl;
+        private boolean verifyPeer = true;
+        private Duration timeout;
 
-    /**
-     * Creates a Redis config with authentication, over TLS, choosing whether to verify the peer.
-     *
-     * <p>{@code verifyPeer = false} is for a link whose endpoints are already known to each other
-     * by other means — a private bridge between containers one owns, for instance. It encrypts and
-     * it does not authenticate; whoever passes it should be able to say why.
-     *
-     * @param host the Redis server host
-     * @param port the Redis server port
-     * @param password the Redis password
-     * @param ssl whether to speak TLS
-     * @param verifyPeer whether to verify the certificate and hostname
-     * @return a Redis configuration
-     */
-    public static RedisConfig of(String host, int port, String password, boolean ssl,
-                                 boolean verifyPeer) {
-        return new RedisConfig(host, port, password, 0, ssl, verifyPeer);
-    }
-
-    /**
-     * Gets the Redis URI for Lettuce connection.
-     * Format: redis://[:password@]host:port/database, or rediss:// when {@link #ssl()}.
-     *
-     * <p>The scheme follows {@code ssl} rather than being hardcoded. Nothing in this repository
-     * calls this method — {@link RedisTransport} builds its {@code RedisURI} from the components —
-     * and that is precisely why it mattered: a dead helper that quietly builds a CLEARTEXT URI is
-     * the kind of thing someone picks up one day believing it works.
-     *
-     * @return the Redis URI string
-     */
-    public String toUri() {
-        StringBuilder uri = new StringBuilder(ssl ? "rediss://" : "redis://");
-        
-        if (password != null && !password.isEmpty()) {
-            uri.append(":").append(password).append("@");
+        private Builder(String host, int port) {
+            this.host = host;
+            this.port = port;
         }
-        
-        uri.append(host).append(":").append(port);
-        uri.append("/").append(database);
-        
-        return uri.toString();
+
+        /**
+         * @param username ACL user name
+         * @param password its password
+         * @return this builder
+         */
+        public Builder credentials(String username, String password) {
+            this.username = username;
+            this.password = password;
+            return this;
+        }
+
+        /**
+         * @param password password of the {@code default} user
+         * @return this builder
+         */
+        public Builder password(String password) {
+            this.password = password;
+            return this;
+        }
+
+        /**
+         * @param database database number
+         * @return this builder
+         */
+        public Builder database(int database) {
+            this.database = database;
+            return this;
+        }
+
+        /**
+         * Speaks TLS, verifying the server.
+         *
+         * @return this builder
+         */
+        public Builder ssl() {
+            this.ssl = true;
+            return this;
+        }
+
+        /**
+         * Speaks TLS WITHOUT verifying the server: encrypted, not authenticated. For a link whose
+         * endpoints are known to each other by other means; whoever calls it should be able to say why.
+         *
+         * @return this builder
+         */
+        public Builder sslWithoutPeerVerification() {
+            this.ssl = true;
+            this.verifyPeer = false;
+            return this;
+        }
+
+        /**
+         * @param timeout command timeout
+         * @return this builder
+         */
+        public Builder timeout(Duration timeout) {
+            this.timeout = timeout;
+            return this;
+        }
+
+        /**
+         * @return the configuration
+         */
+        public RedisConfig build() {
+            return new RedisConfig(host, port, username, password, database, ssl, verifyPeer, timeout);
+        }
     }
 }

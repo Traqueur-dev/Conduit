@@ -2,6 +2,8 @@ package fr.traqueur.conduit.packet;
 
 import fr.traqueur.conduit.core.Conduit;
 
+import java.util.concurrent.CompletableFuture;
+
 /**
  * Interface for packets that can be sent to a specific target instance (unicast).
  * 
@@ -24,7 +26,7 @@ public interface TargetablePacket extends Packet {
      * @throws UnsupportedOperationException always thrown
      */
     @Override
-    default void send() {
+    default CompletableFuture<Void> send() {
         throw new UnsupportedOperationException(
                 "Use sendTo(String targetId) for targetable packets. Regular send() is not supported."
         );
@@ -34,8 +36,9 @@ public interface TargetablePacket extends Packet {
      * Sends this packet to a specific target instance (unicast).
      *
      * @param targetId the unique identifier of the target instance
+     * @return a future that completes once the transport published it
      */
-    default void sendTo(String targetId) {
-        Conduit.getInstance().sendTo(this, targetId);
+    default CompletableFuture<Void> sendTo(String targetId) {
+        return Conduit.getInstance().sendTo(this, targetId);
     }
 }

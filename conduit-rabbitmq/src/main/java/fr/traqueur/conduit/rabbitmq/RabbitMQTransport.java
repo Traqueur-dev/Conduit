@@ -1,27 +1,53 @@
 package fr.traqueur.conduit.rabbitmq;
 
-import com.rabbitmq.client.*;
-import fr.traqueur.conduit.core.AckResponse;
-import fr.traqueur.conduit.core.PacketEnvelope;
+import com.rabbitmq.client.BuiltinExchangeType;
+import com.rabbitmq.client.Channel;
+import com.rabbitmq.client.ConfirmListener;
+import com.rabbitmq.client.Connection;
+import com.rabbitmq.client.ConnectionFactory;
+import com.rabbitmq.client.DeliverCallback;
 import fr.traqueur.conduit.transport.Transport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.NavigableMap;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.function.BiConsumer;
 
 /**
- * RabbitMQ transport implementation.
+ * RabbitMQ transport.
  *
- * <p>Uses fanout exchanges for broadcast and direct exchanges for unicast.
- * Maintains separate channels for publishing and consuming to ensure thread-safety,
- * with a lock protecting all publish operations.</p>
+ * <p>Every exchange and queue name starts with the {@linkplain #channelPrefix() channel prefix}:</p>
+ * <ul>
+ *   <li>broadcast: fanout exchange {@code <prefix>conduit.broadcast.<channel>}, one exclusive queue
+ *       {@code <prefix>conduit.sub.<channel>.<random>} per subscriber;</li>
+ *   <li>unicast: direct exchange {@code <prefix>conduit.direct.<channel>}, routing key = instance id,
+ *       queue {@code <prefix>conduit.unicast.<channel>.<instanceId>}.</li>
+ * </ul>
+ * <p>A RabbitMQ user can thus be restricted to one prefix with a permission regex such as
+ * {@code ^valkn-prod:.*}, as a Redis ACL user is with a channel pattern.</p>
+ *
+ * <pre>
+ * new RabbitMQTransport(RabbitMQConfig.localhost());                 // its own connection
+ * new RabbitMQTransport(connectionFactory);                          // its own connection, any setting
+ * new RabbitMQTransport(applicationConnection);                      // the application's connection
+ * RabbitMQTransport.builder().connection(applicationConnection).channelPrefix("valkn-prod:").build();
+ * </pre>
+ *
+ * <p>A connection passed in is never closed by {@link #close()}: only the channels and queues
+ * this transport opened are.</p>
+ *
+ * <p>Publishing uses publisher confirms: the future of {@link #broadcast} and {@link #sendTo}
+ * completes when the broker confirms, and fails when it refuses (nack, permission denied, closed
+ * channel). Each subscription has its own channel, and declarations run on a short-lived one, so
+ * that a refusal — which closes the channel it happens on — never takes other subscriptions down.</p>
  *
  * @author Traqueur
  */
@@ -29,272 +55,135 @@ public class RabbitMQTransport implements Transport {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(RabbitMQTransport.class);
 
-    private final RabbitMQConfig config;
-    private Connection connection;
-    private Channel consumeChannel;
-    private Channel publishChannel;
-    private final Object publishLock = new Object();
+    private final ConnectionFactory factory;
+    private final Connection providedConnection;
+    private final String channelPrefix;
 
-    // Cache of declared exchanges to avoid redundant round-trips
+    private volatile Connection connection;
+    private final Object publishLock = new Object();
+    private PublishChannel publishChannel;
+
+    // Exchanges declared in this session: declaration is a round-trip, done once per name.
     private final Set<String> declaredExchanges = ConcurrentHashMap.newKeySet();
 
-    // Queues for receiving messages
-    private final Map<String, String> queueNames = new ConcurrentHashMap<>();
-
-    // Pour gérer les ACK
-    private final Map<String, CompletableFuture<AckResponse>> pendingAcks = new ConcurrentHashMap<>();
+    // Active subscriptions, by key: "b:<channel>" or "u:<channel>:<instanceId>"
+    private final Object subscribeLock = new Object();
+    private final Map<String, Subscription> subscriptions = new ConcurrentHashMap<>();
 
     /**
-     * Creates a new RabbitMQ transport with the specified configuration.
+     * A transport that opens and owns its connection.
      *
      * @param config the RabbitMQ configuration
      */
     public RabbitMQTransport(RabbitMQConfig config) {
-        this.config = config;
+        this(factoryOf(config), null, "");
     }
 
-    @Override
-    public void connect() throws Exception {
+    /**
+     * A transport that opens and owns its connection from a factory (TLS, timeouts, credentials provider...).
+     *
+     * @param factory the connection factory
+     */
+    public RabbitMQTransport(ConnectionFactory factory) {
+        this(Objects.requireNonNull(factory, "factory"), null, "");
+    }
+
+    /**
+     * A transport on a connection the application owns, which this transport never closes.
+     *
+     * @param connection the connection
+     */
+    public RabbitMQTransport(Connection connection) {
+        this(null, Objects.requireNonNull(connection, "connection"), "");
+    }
+
+    private RabbitMQTransport(ConnectionFactory factory, Connection providedConnection, String channelPrefix) {
+        this.factory = factory;
+        this.providedConnection = providedConnection;
+        this.channelPrefix = channelPrefix == null ? "" : channelPrefix;
+    }
+
+    /**
+     * @return a builder
+     */
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    static ConnectionFactory factoryOf(RabbitMQConfig config) {
         ConnectionFactory factory = new ConnectionFactory();
         factory.setHost(config.host());
         factory.setPort(config.port());
         factory.setUsername(config.username());
         factory.setPassword(config.password());
         factory.setVirtualHost(config.virtualHost());
-
-        // Enable auto-recovery
         factory.setAutomaticRecoveryEnabled(true);
         factory.setNetworkRecoveryInterval(5000);
-
-        connection = factory.newConnection();
-        consumeChannel = connection.createChannel();
-        publishChannel = connection.createChannel();
-
-        LOGGER.info("Connected to RabbitMQ at {}:{}", config.host(), config.port());
+        return factory;
     }
 
     @Override
-    public void broadcast(String channelName, byte[] data) {
-        String exchangeName = "conduit.broadcast." + channelName;
-        try {
-            synchronized (publishLock) {
-                ensureExchange(exchangeName, BuiltinExchangeType.FANOUT);
-                publishChannel.basicPublish(exchangeName, "", null, data);
-            }
-            LOGGER.debug("Published to broadcast exchange: {}", exchangeName);
-        } catch (IOException e) {
-            LOGGER.error("Failed to broadcast message", e);
-        }
+    public void connect() throws Exception {
+        connection = providedConnection != null ? providedConnection : factory.newConnection();
+        LOGGER.info("Connected to RabbitMQ at {}:{}{}, channel prefix '{}'", connection.getAddress(), connection.getPort(),
+                providedConnection != null ? " (provided connection)" : "", channelPrefix);
     }
 
     @Override
-    public void sendTo(String channelName, String targetId, byte[] data) {
-        String exchangeName = "conduit.direct." + channelName;
-        try {
-            synchronized (publishLock) {
-                ensureExchange(exchangeName, BuiltinExchangeType.DIRECT);
-                publishChannel.basicPublish(exchangeName, targetId, null, data);
-            }
-            LOGGER.debug("Published to direct exchange: {} with routing key: {}", exchangeName, targetId);
-        } catch (IOException e) {
-            LOGGER.error("Failed to send unicast message", e);
-        }
+    public CompletableFuture<Void> broadcast(String channel, byte[] data) {
+        return publish(broadcastExchange(channel), BuiltinExchangeType.FANOUT, "", data);
     }
 
     @Override
-    public CompletableFuture<AckResponse> broadcastWithAck(String channel, byte[] data, long timeoutMs) {
-        String correlationId = UUID.randomUUID().toString();
-        CompletableFuture<AckResponse> future = new CompletableFuture<>();
-        pendingAcks.put(correlationId, future);
-
-        try {
-            // Create temporary reply queue and consumer on consumeChannel
-            String replyQueue = consumeChannel.queueDeclare().getQueue();
-            consumeChannel.basicConsume(replyQueue, true,
-                    new AckConsumer(correlationId),
-                    consumerTag -> LOGGER.debug("ACK consumer cancelled: {}", consumerTag));
-
-            // Send message with reply-to on publishChannel
-            String exchangeName = "conduit.broadcast." + channel;
-            AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
-                    .correlationId(correlationId)
-                    .replyTo(replyQueue)
-                    .build();
-
-            synchronized (publishLock) {
-                ensureExchange(exchangeName, BuiltinExchangeType.FANOUT);
-                publishChannel.basicPublish(exchangeName, "", props, data);
-            }
-
-            LOGGER.debug("Published with ACK to exchange: {} (correlationId: {})", exchangeName, correlationId);
-
-            // Timeout handling — attach cleanup to original future, not the orTimeout derivative
-            future.orTimeout(timeoutMs, TimeUnit.MILLISECONDS);
-            future.whenComplete((result, error) -> {
-                pendingAcks.remove(correlationId);
-                try {
-                    if (consumeChannel != null && consumeChannel.isOpen()) {
-                        consumeChannel.queueDelete(replyQueue);
-                    }
-                } catch (IOException e) {
-                    LOGGER.warn("Failed to delete reply queue: {}", replyQueue, e);
-                }
-            });
-
-        } catch (IOException e) {
-            future.completeExceptionally(e);
-            pendingAcks.remove(correlationId);
-        }
-
-        return future;
+    public CompletableFuture<Void> sendTo(String channel, String targetId, byte[] data) {
+        return publish(directExchange(channel), BuiltinExchangeType.DIRECT, targetId, data);
     }
 
     @Override
-    public void sendAckResponse(String channel, byte[] data, Map<String, String> metadata) {
-        // RabbitMQ: check for replyTo queue
-        String replyTo = metadata.get("rabbitmq.replyTo");
-        String correlationId = metadata.get("rabbitmq.correlationId");
-
-        if (replyTo != null && correlationId != null) {
-            // Use RabbitMQ request/reply pattern
-            try {
-                AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
-                        .correlationId(correlationId)
-                        .build();
-
-                synchronized (publishLock) {
-                    publishChannel.basicPublish("", replyTo, props, data);
-                }
-
-                LOGGER.debug("Sent ACK to replyTo queue: {} with correlationId: {}", replyTo, correlationId);
-
-            } catch (IOException e) {
-                LOGGER.error("Failed to send ACK to reply queue: {}", replyTo, e);
-            }
-        } else {
-            // Fallback: broadcast on original channel
-            broadcast(channel, data);
-        }
+    public CompletableFuture<Void> subscribe(String channel, BiConsumer<String, byte[]> handler) {
+        String exchange = broadcastExchange(channel);
+        return consume("b:" + channel, ch -> {
+            declareExchange(exchange, BuiltinExchangeType.FANOUT);
+            // Exclusive and auto-deleted, named (not server-named) so that it carries the prefix.
+            String queue = channelPrefix + "conduit.sub." + channel + "." + UUID.randomUUID();
+            ch.queueDeclare(queue, false, true, true, null);
+            ch.queueBind(queue, exchange, "");
+            return queue;
+        }, channel, handler);
     }
 
     @Override
-    public CompletableFuture<AckResponse> sendToWithAck(String channel, String targetId, byte[] data, long timeoutMs) {
-        String correlationId = UUID.randomUUID().toString();
-        CompletableFuture<AckResponse> future = new CompletableFuture<>();
-        pendingAcks.put(correlationId, future);
-
-        try {
-            // Create temporary reply queue and consumer on consumeChannel
-            String replyQueue = consumeChannel.queueDeclare().getQueue();
-            consumeChannel.basicConsume(replyQueue, true,
-                    new AckConsumer(correlationId),
-                    consumerTag -> LOGGER.debug("ACK consumer cancelled: {}", consumerTag));
-
-            // Send message with reply-to on publishChannel
-            String exchangeName = "conduit.direct." + channel;
-            AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
-                    .correlationId(correlationId)
-                    .replyTo(replyQueue)
-                    .build();
-
-            synchronized (publishLock) {
-                ensureExchange(exchangeName, BuiltinExchangeType.DIRECT);
-                publishChannel.basicPublish(exchangeName, targetId, props, data);
-            }
-
-            LOGGER.debug("Published with ACK to exchange: {} routing key: {} (correlationId: {})",
-                    exchangeName, targetId, correlationId);
-
-            // Timeout handling — attach cleanup to original future, not the orTimeout derivative
-            future.orTimeout(timeoutMs, TimeUnit.MILLISECONDS);
-            future.whenComplete((result, error) -> {
-                pendingAcks.remove(correlationId);
-                try {
-                    if (consumeChannel != null && consumeChannel.isOpen()) {
-                        consumeChannel.queueDelete(replyQueue);
-                    }
-                } catch (IOException e) {
-                    LOGGER.warn("Failed to delete reply queue: {}", replyQueue, e);
-                }
-            });
-
-        } catch (IOException e) {
-            future.completeExceptionally(e);
-            pendingAcks.remove(correlationId);
-        }
-
-        return future;
+    public CompletableFuture<Void> subscribeUnicast(String channel, String instanceId, BiConsumer<String, byte[]> handler) {
+        String exchange = directExchange(channel);
+        return consume("u:" + channel + ":" + instanceId, ch -> {
+            declareExchange(exchange, BuiltinExchangeType.DIRECT);
+            // Durable for RabbitMQ 4.x (transient non-exclusive queues are deprecated), auto-deleted.
+            String queue = channelPrefix + "conduit.unicast." + channel + "." + instanceId;
+            ch.queueDeclare(queue, true, false, true, null);
+            ch.queueBind(queue, exchange, instanceId);
+            return queue;
+        }, channel, handler);
     }
 
     @Override
-    public void subscribe(String channel, BiConsumer<String, byte[]> handler) {
-        try {
-            String exchangeName = "conduit.broadcast." + channel;
-
-            synchronized (publishLock) {
-                ensureExchange(exchangeName, BuiltinExchangeType.FANOUT);
-            }
-
-            // Create exclusive queue for this instance (auto-delete when connection closes)
-            String queueName = consumeChannel.queueDeclare().getQueue();
-            consumeChannel.queueBind(queueName, exchangeName, "");
-
-            // Start consuming
-            consumeChannel.basicConsume(queueName, true,
-                    new MessageConsumer(channel, handler),
-                    consumerTag -> LOGGER.debug("Consumer cancelled: {}", consumerTag));
-
-            LOGGER.info("Subscribed to broadcast channel: {} via queue: {}", channel, queueName);
-
-        } catch (IOException e) {
-            LOGGER.error("Failed to subscribe to channel: {}", channel, e);
-        }
+    public CompletableFuture<Void> unsubscribe(String channel) {
+        return cancel("b:" + channel);
     }
 
     @Override
-    public void subscribeUnicast(String channelName, String instanceId, BiConsumer<String, byte[]> handler) {
-        try {
-            String exchangeName = "conduit.direct." + channelName;
-
-            synchronized (publishLock) {
-                ensureExchange(exchangeName, BuiltinExchangeType.DIRECT);
-            }
-
-            // Create queue with instanceId as routing key
-            String queueName = "conduit.unicast." + channelName + "." + instanceId;
-            consumeChannel.queueDeclare(queueName, true, false, true, null);
-            consumeChannel.queueBind(queueName, exchangeName, instanceId);
-
-            queueNames.put(channelName + ":" + instanceId, queueName);
-
-            // Setup consumer
-            consumeChannel.basicConsume(queueName, true,
-                    new MessageConsumer(channelName, handler),
-                    consumerTag -> LOGGER.debug("Consumer cancelled: {}", consumerTag));
-
-            LOGGER.info("Subscribed to unicast exchange: {} with routing key: {}", exchangeName, instanceId);
-
-        } catch (IOException e) {
-            LOGGER.error("Failed to subscribe to unicast channel: {}", channelName, e);
-        }
-    }
-
-    @Override
-    public void unsubscribe(String channelName) {
-        String queueName = queueNames.remove(channelName);
-        if (queueName != null) {
-            try {
-                consumeChannel.queueDelete(queueName);
-                LOGGER.info("Unsubscribed from channel: {}", channelName);
-            } catch (IOException e) {
-                LOGGER.error("Failed to unsubscribe from channel: {}", channelName, e);
-            }
-        }
+    public CompletableFuture<Void> unsubscribeUnicast(String channel, String instanceId) {
+        return cancel("u:" + channel + ":" + instanceId);
     }
 
     @Override
     public boolean isConnected() {
-        return connection != null && connection.isOpen();
+        Connection c = connection;
+        return c != null && c.isOpen();
+    }
+
+    @Override
+    public String channelPrefix() {
+        return channelPrefix;
     }
 
     @Override
@@ -302,149 +191,255 @@ public class RabbitMQTransport implements Transport {
         return "rabbitmq";
     }
 
+    /**
+     * Deletes this transport's queues and closes its channels, and the connection only if it
+     * opened it.
+     */
     @Override
     public void close() throws Exception {
-        if (consumeChannel != null && consumeChannel.isOpen()) {
-            consumeChannel.close();
+        synchronized (subscribeLock) {
+            for (String key : Set.copyOf(subscriptions.keySet())) {
+                cancel(key);
+            }
         }
-        if (publishChannel != null && publishChannel.isOpen()) {
-            publishChannel.close();
+        synchronized (publishLock) {
+            if (publishChannel != null) {
+                closeQuietly(publishChannel.channel);
+                publishChannel = null;
+            }
         }
-        if (connection != null && connection.isOpen()) {
+        if (providedConnection == null && connection != null && connection.isOpen()) {
             connection.close();
         }
         LOGGER.info("RabbitMQ transport closed");
     }
 
-    /**
-     * Declares an exchange only if it has not been declared before in this session.
-     * Avoids redundant round-trips to the broker for every message.
-     * Must be called while holding {@code publishLock}.
-     *
-     * @param name the exchange name
-     * @param type the exchange type
-     * @throws IOException if the declaration fails
-     */
-    private void ensureExchange(String name, BuiltinExchangeType type) throws IOException {
-        if (declaredExchanges.add(name)) {
-            publishChannel.exchangeDeclare(name, type, true);
-        }
+    private String broadcastExchange(String channel) {
+        return channelPrefix + "conduit.broadcast." + channel;
     }
 
-    // ===== Inner Classes =====
+    private String directExchange(String channel) {
+        return channelPrefix + "conduit.direct." + channel;
+    }
 
-    /**
-     * Consumer for regular messages.
-     * Handles both broadcast and unicast packet deliveries,
-     * extracting RabbitMQ-specific metadata and passing it to the handler.
-     */
-    private class MessageConsumer implements DeliverCallback {
-
-        private final String channelName;
-        private final BiConsumer<String, byte[]> handler;
-
-        /**
-         * Creates a new message consumer.
-         *
-         * @param channelName the channel name
-         * @param handler the callback to invoke with received messages
-         */
-        public MessageConsumer(String channelName, BiConsumer<String, byte[]> handler) {
-            this.channelName = channelName;
-            this.handler = handler;
+    private CompletableFuture<Void> publish(String exchange, BuiltinExchangeType type, String routingKey, byte[] data) {
+        if (!isConnected()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("RabbitMQ transport is not connected"));
         }
-
-        /**
-         * Handles message delivery from RabbitMQ.
-         * Extracts replyTo and correlationId properties and injects them
-         * into the packet envelope metadata for ACK routing.
-         *
-         * @param consumerTag the consumer tag
-         * @param delivery the message delivery
-         */
-        @Override
-        public void handle(String consumerTag, Delivery delivery) {
+        synchronized (publishLock) {
+            long seqNo = -1;
+            PublishChannel pc = null;
             try {
-                byte[] body = delivery.getBody();
-
-                // Extract RabbitMQ properties
-                String replyTo = delivery.getProperties().getReplyTo();
-                String correlationId = delivery.getProperties().getCorrelationId();
-
-                // If this has RabbitMQ ACK metadata, we need to inject it into the envelope
-                if (replyTo != null && correlationId != null) {
-                    // Deserialize envelope
-                    PacketEnvelope envelope = PacketEnvelope.fromBytes(body);
-
-                    // Add RabbitMQ metadata
-                    envelope.metadata().put("rabbitmq.replyTo", replyTo);
-                    envelope.metadata().put("rabbitmq.correlationId", correlationId);
-
-                    // Re-serialize with metadata
-                    body = envelope.toBytes();
+                declareExchange(exchange, type);
+                pc = publishChannel();
+                CompletableFuture<Void> confirmed = new CompletableFuture<>();
+                seqNo = pc.channel.getNextPublishSeqNo();
+                pc.unconfirmed.put(seqNo, confirmed);
+                pc.channel.basicPublish(exchange, routingKey, null, data);
+                return confirmed;
+            } catch (IOException | RuntimeException e) {
+                if (pc != null && seqNo >= 0) {
+                    pc.unconfirmed.remove(seqNo);
                 }
-
-                handler.accept(channelName, body);
-
-            } catch (Exception e) {
-                LOGGER.error("Failed to handle message", e);
+                return CompletableFuture.failedFuture(e);
             }
         }
     }
 
+    /** The publishing channel, reopened when the broker closed it (e.g. after a refused publish). */
+    private PublishChannel publishChannel() throws IOException {
+        if (publishChannel == null || !publishChannel.channel.isOpen()) {
+            Channel channel = connection.createChannel();
+            channel.confirmSelect();
+            PublishChannel pc = new PublishChannel(channel, new ConcurrentSkipListMap<>());
+            channel.addConfirmListener(new ConfirmListener() {
+                @Override
+                public void handleAck(long deliveryTag, boolean multiple) {
+                    settle(pc.unconfirmed, deliveryTag, multiple, null);
+                }
+
+                @Override
+                public void handleNack(long deliveryTag, boolean multiple) {
+                    settle(pc.unconfirmed, deliveryTag, multiple, new IOException("RabbitMQ refused the message (nack)"));
+                }
+            });
+            channel.addShutdownListener(cause -> {
+                // Whatever was not confirmed when the channel went down is not known to be published.
+                pc.unconfirmed.values().forEach(f -> f.completeExceptionally(cause));
+                pc.unconfirmed.clear();
+                if (!cause.isInitiatedByApplication()) {
+                    LOGGER.warn("RabbitMQ publish channel closed: {}", cause.getMessage());
+                }
+            });
+            publishChannel = pc;
+        }
+        return publishChannel;
+    }
+
+    private static void settle(NavigableMap<Long, CompletableFuture<Void>> unconfirmed, long tag, boolean multiple,
+                               Throwable error) {
+        Map<Long, CompletableFuture<Void>> done = multiple ? unconfirmed.headMap(tag, true) : unconfirmedOne(unconfirmed, tag);
+        for (CompletableFuture<Void> f : done.values()) {
+            if (error == null) {
+                f.complete(null);
+            } else {
+                f.completeExceptionally(error);
+            }
+        }
+        done.clear();
+    }
+
+    private static Map<Long, CompletableFuture<Void>> unconfirmedOne(NavigableMap<Long, CompletableFuture<Void>> unconfirmed, long tag) {
+        return unconfirmed.subMap(tag, true, tag, true);
+    }
+
+    /** Declares an exchange once per session, on a short-lived channel: a refusal closes only that one. */
+    private void declareExchange(String name, BuiltinExchangeType type) throws IOException {
+        if (declaredExchanges.contains(name)) {
+            return;
+        }
+        Channel channel = connection.createChannel();
+        try {
+            channel.exchangeDeclare(name, type, true);
+        } finally {
+            closeQuietly(channel);
+        }
+        declaredExchanges.add(name); // Only once declared: a failed declaration is retried next time.
+    }
+
+    private CompletableFuture<Void> consume(String key, QueueSetup setup, String logical, BiConsumer<String, byte[]> handler) {
+        if (!isConnected()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("RabbitMQ transport is not connected"));
+        }
+        synchronized (subscribeLock) {
+            cancel(key);
+            Channel channel = null;
+            try {
+                channel = connection.createChannel();
+                String queue = setup.declare(channel);
+                String tag = channel.basicConsume(queue, true, deliver(logical, handler),
+                        consumerTag -> LOGGER.debug("Consumer cancelled: {}", consumerTag));
+                subscriptions.put(key, new Subscription(channel, queue, tag));
+                LOGGER.debug("Subscribed {} via queue {}", key, queue);
+                return CompletableFuture.completedFuture(null);
+            } catch (IOException | RuntimeException e) {
+                if (channel != null) {
+                    closeQuietly(channel);
+                }
+                return CompletableFuture.failedFuture(e);
+            }
+        }
+    }
+
+    private CompletableFuture<Void> cancel(String key) {
+        synchronized (subscribeLock) {
+            Subscription subscription = subscriptions.remove(key);
+            if (subscription == null || !subscription.channel.isOpen()) {
+                return CompletableFuture.completedFuture(null);
+            }
+            try {
+                subscription.channel.basicCancel(subscription.consumerTag);
+                subscription.channel.queueDelete(subscription.queue);
+                return CompletableFuture.completedFuture(null);
+            } catch (IOException | RuntimeException e) {
+                return CompletableFuture.failedFuture(e);
+            } finally {
+                closeQuietly(subscription.channel);
+            }
+        }
+    }
+
+    private static void closeQuietly(Channel channel) {
+        if (!channel.isOpen()) {
+            return; // Already closed, by the broker (a refusal) or by the connection.
+        }
+        try {
+            channel.close();
+        } catch (IOException | RuntimeException | java.util.concurrent.TimeoutException e) {
+            LOGGER.debug("Closing RabbitMQ channel {} failed", channel.getChannelNumber(), e);
+        }
+    }
+
+    private static DeliverCallback deliver(String logical, BiConsumer<String, byte[]> handler) {
+        return (consumerTag, delivery) -> {
+            try {
+                handler.accept(logical, delivery.getBody());
+            } catch (RuntimeException e) {
+                // Never let a handler kill the consumer.
+                LOGGER.error("Handler of RabbitMQ channel {} threw", logical, e);
+            }
+        };
+    }
+
+    @FunctionalInterface
+    private interface QueueSetup {
+        String declare(Channel channel) throws IOException;
+    }
+
+    private record PublishChannel(Channel channel, ConcurrentSkipListMap<Long, CompletableFuture<Void>> unconfirmed) {}
+
+    private record Subscription(Channel channel, String queue, String consumerTag) {}
+
     /**
-     * Consumer for ACK responses.
-     * Listens on temporary reply queues for acknowledgment responses
-     * and completes the corresponding future when a matching correlationId is received.
+     * Builder of {@link RabbitMQTransport}: exactly one of {@link #config}, {@link #connectionFactory}
+     * or {@link #connection}.
      */
-    private class AckConsumer implements DeliverCallback {
+    public static final class Builder {
+        private ConnectionFactory factory;
+        private Connection connection;
+        private String channelPrefix = "";
 
-        private final String correlationId;
-
-        /**
-         * Creates a new ACK consumer.
-         *
-         * @param correlationId the correlation ID to match
-         */
-        public AckConsumer(String correlationId) {
-            this.correlationId = correlationId;
+        private Builder() {
         }
 
         /**
-         * Handles ACK response delivery from RabbitMQ.
-         * Matches the correlationId and completes the pending future with the ACK response.
-         *
-         * @param consumerTag the consumer tag
-         * @param delivery the ACK response delivery
+         * @param config settings of a connection the transport opens and owns
+         * @return this builder
          */
-        @Override
-        public void handle(String consumerTag, Delivery delivery) {
-            String receivedCorrelationId = delivery.getProperties().getCorrelationId();
+        public Builder config(RabbitMQConfig config) {
+            this.factory = factoryOf(config);
+            return this;
+        }
 
-            if (correlationId.equals(receivedCorrelationId)) {
-                CompletableFuture<AckResponse> future = pendingAcks.remove(correlationId);
+        /**
+         * @param factory factory of a connection the transport opens and owns
+         * @return this builder
+         */
+        public Builder connectionFactory(ConnectionFactory factory) {
+            this.factory = factory;
+            return this;
+        }
 
-                if (future != null) {
-                    try {
-                        // Deserialize envelope to extract AckResponse
-                        byte[] body = delivery.getBody();
-                        PacketEnvelope envelope = PacketEnvelope.fromBytes(body);
+        /**
+         * @param connection a connection the application owns; never closed by the transport
+         * @return this builder
+         */
+        public Builder connection(Connection connection) {
+            this.connection = connection;
+            return this;
+        }
 
-                        if (envelope.isAckResponse() && envelope.ackResponse() != null) {
-                            future.complete(envelope.ackResponse());
-                            LOGGER.debug("Received ACK for correlationId: {}", correlationId);
-                        } else {
-                            future.completeExceptionally(
-                                    new RuntimeException("Invalid ACK response received")
-                            );
-                        }
+        /**
+         * A prefix for every exchange and queue, so that environments sharing one broker do not see
+         * each other. Signed into every envelope.
+         *
+         * @param channelPrefix the prefix, e.g. {@code "valkn-prod:"}
+         * @return this builder
+         */
+        public Builder channelPrefix(String channelPrefix) {
+            this.channelPrefix = channelPrefix;
+            return this;
+        }
 
-                    } catch (Exception e) {
-                        LOGGER.error("Failed to deserialize ACK response", e);
-                        future.completeExceptionally(e);
-                    }
-                }
+        /**
+         * @return the transport
+         * @throws IllegalStateException unless exactly one of config, connectionFactory or connection was given
+         */
+        public RabbitMQTransport build() {
+            if ((factory == null) == (connection == null)) {
+                throw new IllegalStateException("Give exactly one of config(), connectionFactory() or connection()");
             }
+            return new RabbitMQTransport(factory, connection, channelPrefix);
         }
     }
 }

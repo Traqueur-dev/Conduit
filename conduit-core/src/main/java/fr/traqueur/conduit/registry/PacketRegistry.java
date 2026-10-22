@@ -6,100 +6,101 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Registry for packet types, mapping packet class names to their classes.
- * Handles packet serialization/deserialization type mapping.
+ * Two-way mapping between wire names and packet classes, with the channel of each type.
+ *
+ * <p>A wire name maps to exactly one class and a class to exactly one wire name; anything else
+ * is refused. Reads are lock-free; writes are serialized.</p>
  *
  * @author Traqueur
  */
 public class PacketRegistry {
 
-    private final Map<String, Class<? extends Packet>> packetTypes = new ConcurrentHashMap<>();
-    private final Map<Class<? extends Packet>, String> reverseMapping = new ConcurrentHashMap<>();
+    private final Map<String, Registration> byWire = new ConcurrentHashMap<>();
+    private final Map<Class<? extends Packet>, Registration> byClass = new ConcurrentHashMap<>();
 
     /**
-     * Creates a new packet registry.
+     * Creates an empty registry.
      */
     public PacketRegistry() {
     }
-    
+
     /**
-     * Registers a packet type with its simple class name as identifier.
-     * 
-     * @param packetClass the packet class to register
+     * Registers a type.
+     *
+     * @param wireName    the wire name
+     * @param packetClass the class
+     * @param channel     the channel the type travels on
+     * @return {@code true} if added, {@code false} if this exact registration already existed
+     * @throws IllegalStateException if the wire name belongs to another class, or the class to
+     *                               another wire name or channel
      */
-    public void register(Class<? extends Packet> packetClass) {
-        String typeName = packetClass.getSimpleName();
-        register(typeName, packetClass);
+    public synchronized boolean register(String wireName, Class<? extends Packet> packetClass, String channel) {
+        Registration existingByClass = byClass.get(packetClass);
+        if (existingByClass != null) {
+            if (existingByClass.wireName().equals(wireName) && existingByClass.channel().equals(channel)) {
+                return false;
+            }
+            throw new IllegalStateException("Packet class " + packetClass.getName()
+                    + " is already registered as '" + existingByClass.wireName() + "' on channel '"
+                    + existingByClass.channel() + "'; cannot register it as '" + wireName
+                    + "' on channel '" + channel + "'");
+        }
+        Registration existingByWire = byWire.get(wireName);
+        if (existingByWire != null) {
+            throw new IllegalStateException("Wire name '" + wireName + "' is already used by "
+                    + existingByWire.packetClass().getName() + "; cannot register it for "
+                    + packetClass.getName());
+        }
+        Registration registration = new Registration(wireName, packetClass, channel);
+        byWire.put(wireName, registration);
+        byClass.put(packetClass, registration);
+        return true;
     }
-    
+
     /**
-     * Registers a packet type with a custom type name.
-     * 
-     * @param typeName custom type identifier
-     * @param packetClass the packet class
+     * Removes a type.
+     *
+     * @param packetClass the class
+     * @return the removed registration, or null if it was not registered
      */
-    public void register(String typeName, Class<? extends Packet> packetClass) {
-        packetTypes.put(typeName, packetClass);
-        reverseMapping.put(packetClass, typeName);
+    public synchronized Registration unregister(Class<? extends Packet> packetClass) {
+        Registration registration = byClass.remove(packetClass);
+        if (registration != null) {
+            byWire.remove(registration.wireName());
+        }
+        return registration;
     }
-    
+
     /**
-     * Gets the packet class for a given type name.
-     * 
-     * @param typeName the type identifier
-     * @return the packet class, or null if not found
+     * @param wireName the wire name
+     * @return the registration, or null
      */
-    public Class<? extends Packet> getPacketClass(String typeName) {
-        return packetTypes.get(typeName);
+    public Registration byWire(String wireName) {
+        return byWire.get(wireName);
     }
-    
+
     /**
-     * Gets the type name for a given packet class.
-     * 
-     * @param packetClass the packet class
-     * @return the type identifier, or the simple class name if not registered
+     * @param packetClass the class
+     * @return the registration, or null
      */
-    public String getTypeName(Class<? extends Packet> packetClass) {
-        return reverseMapping.getOrDefault(packetClass, packetClass.getSimpleName());
+    public Registration byClass(Class<? extends Packet> packetClass) {
+        return byClass.get(packetClass);
     }
-    
+
     /**
-     * Gets the type name for a packet instance.
-     * 
-     * @param packet the packet instance
-     * @return the type identifier
+     * @param channel a channel
+     * @return whether at least one registered type uses it
      */
-    public String getTypeName(Packet packet) {
-        return getTypeName(packet.getClass());
+    public boolean isChannelUsed(String channel) {
+        return byClass.values().stream().anyMatch(r -> r.channel().equals(channel));
     }
-    
+
     /**
-     * Checks if a packet type is registered.
-     * 
-     * @param typeName the type identifier
-     * @return true if registered
+     * A registered type.
+     *
+     * @param wireName    the wire name
+     * @param packetClass the class
+     * @param channel     the channel
      */
-    public boolean isRegistered(String typeName) {
-        return packetTypes.containsKey(typeName);
-    }
-    
-    /**
-     * Checks if a packet class is registered.
-     * 
-     * @param packetClass the packet class
-     * @return true if registered
-     */
-    public boolean isRegistered(Class<? extends Packet> packetClass) {
-        return reverseMapping.containsKey(packetClass);
-    }
-    
-    /**
-     * Checks if a packet class is NOT registered.
-     * 
-     * @param packetClass the packet class
-     * @return true if not registered
-     */
-    public boolean isNotRegistered(Class<? extends Packet> packetClass) {
-        return !isRegistered(packetClass);
-    }
+    public record Registration(String wireName, Class<? extends Packet> packetClass, String channel) {}
 }

@@ -51,4 +51,11 @@ public record RabbitMQConfig(
     public static RabbitMQConfig of(String host, int port, String username, String password) {
         return new RabbitMQConfig(host, port, username, password, "/");
     }
+
+    /** The password never appears here. */
+    @Override
+    public String toString() {
+        return "RabbitMQConfig[amqp://" + username + "@" + host + ":" + port + virtualHost
+                + (password != null ? ", password=***" : "") + "]";
+    }
 }

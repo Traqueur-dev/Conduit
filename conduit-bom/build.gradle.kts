@@ -20,7 +20,7 @@ dependencies {
         api("org.apache.commons:commons-compress:1.28.0")
 
         // Transport dependencies
-        api("io.lettuce:lettuce-core:7.2.0.RELEASE")
+        api("io.lettuce:lettuce-core:7.8.0.RELEASE")
         api("com.rabbitmq:amqp-client:5.28.0")
     }
 }
