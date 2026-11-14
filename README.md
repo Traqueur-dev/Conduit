@@ -5,6 +5,8 @@ A lightweight, high-performance Java messaging library for distributed microserv
 [![Java](https://img.shields.io/badge/Java-21-blue.svg)](https://openjdk.java.net/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
+https://github.com/user-attachments/assets/cc4a9b60-3f68-450d-a652-8db21d36e49f
+
 ## Features
 
 - **Multiple Transport Backends**: Redis (PubSub) and RabbitMQ (AMQP) implementations
