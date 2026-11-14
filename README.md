@@ -5,6 +5,8 @@ A lightweight, high-performance Java messaging library for distributed microserv
 [![Java](https://img.shields.io/badge/Java-21-blue.svg)](https://openjdk.java.net/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
+[![Conduit 2.0 in 24 seconds](docs/media/conduit-2.0.jpg)](docs/media/conduit-2.0.mp4)
+
 ## Features
 
 - **Multiple Transport Backends**: Redis (PubSub) and RabbitMQ (AMQP) implementations
